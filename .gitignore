@@ -6,6 +6,5 @@ cmake-build-*/
 .idea/
 *.swp
 
-
 *.dot
-*.png
+
