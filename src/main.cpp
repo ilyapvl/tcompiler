@@ -2,10 +2,8 @@
 #include <graph/graph.h>
 #include <graph/exceptions.h>
 #include <fstream>
-
 #include <reader/reader.h>
 #include <graph/types.h>
-#include <iostream>
 #include <vector>
 
 
