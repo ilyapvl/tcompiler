@@ -31,6 +31,8 @@ make
 ./main
 ```
 
+Сгенерированный ```.dot``` файл находится в ```tcompiler/output/graph.dot```
+
 ## Документация
 
 Doxygen документация проекта находится в ```tcompiler/html/index.html```
