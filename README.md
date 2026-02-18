@@ -30,3 +30,7 @@ make
 ```
 ./main
 ```
+
+## Документация
+
+Doxygen документация проекта находится в ```tcompiler/html/index.html```
