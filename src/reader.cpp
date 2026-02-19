@@ -3,6 +3,16 @@
 #include <cstring>
 #include <limits>
 
+void write_varint(std::vector<uint8_t>& buf, uint64_t v)
+{
+    do
+    {
+        uint8_t byte = v & 0x7F;
+        v >>= 7;
+        if (v) byte |= 0x80;
+        buf.push_back(byte);
+    } while (v);
+}
 
 static graph::DataType onnx_data_type_to_enum(int32_t onnx_type)
 {
@@ -53,6 +63,7 @@ uint64_t ProtoReader::read_varint()
     {
         check_bound(1);
         uint8_t byte = data_[pos_++];
+        
         result |= (static_cast<uint64_t>(byte & 0x7F) << shift);
         if ((byte & 0x80) == 0) break;
         shift += 7;
@@ -200,6 +211,7 @@ void ProtoReader::skip_group()
 
 TensorInfo parse_TensorInfo(const uint8_t* data, size_t size)
 {
+    std::cout << "Parsing TensorInfo at " << static_cast<const void*>(data) << " size " << size << "\n";
     ProtoReader reader(data, size);
     TensorInfo ti;
     ti.data_type = DataType::UNDEFINED;
@@ -211,9 +223,20 @@ TensorInfo parse_TensorInfo(const uint8_t* data, size_t size)
 
     auto on_simple = [&](uint32_t field_number, int wire_type, uint64_t value)
     {
+        //std::cout << "  simple field=" << field_number << " wire=" << wire_type << " value=" << value << "\n";
         switch (field_number)
         {
+            case 1: // dims (unpacked)
+            if (wire_type == 0)
+            {
+                ti.dims.push_back(static_cast<int64_t>(value));
+            } else {
+                throw parse_error("dims field has wrong wire type");
+            }
+            break;
+
             case 2: //type
+                //std::cout << "  data_type field, wire=" << wire_type << " value=" << value << "\n";
                 if (wire_type == 0)
                 {
                     ti.data_type = onnx_data_type_to_enum(static_cast<int32_t>(value));
@@ -261,27 +284,34 @@ TensorInfo parse_TensorInfo(const uint8_t* data, size_t size)
 
     auto on_length_delimited = [&](uint32_t field_number, const uint8_t* data, size_t size)
     {
+        //std::cout << "  length field=" << field_number << " size=" << size << "\n";
         switch (field_number)
         {
             case 1: //dims
             {
+                //std::cout << "  reading dims, size=" << size << "\n";
                 ProtoReader dims_reader(data, size);
-                while (!dims_reader.eof())
-                {
-                    ti.dims.push_back(static_cast<int64_t>(dims_reader.read_varint()));
+                while (!dims_reader.eof()) {
+                    uint64_t d = dims_reader.read_varint();
+                    //std::cout << "    dim=" << d << "\n";
+                    ti.dims.push_back(static_cast<int64_t>(d));
                 }
                 break;
             }
+
             case 4: //float
             {
                 ProtoReader float_reader(data, size);
+                int count = 0;
                 while (!float_reader.eof())
                 {
                     uint32_t bits = float_reader.read_fixed32();
                     float f;
                     std::memcpy(&f, &bits, sizeof(f));
                     float_data.push_back(f);
+                    count++;
                 }
+                //std::cout << "    read " << count << " floats from packed field\n";
                 break;
             }
             case 5: //int32
@@ -302,7 +332,7 @@ TensorInfo parse_TensorInfo(const uint8_t* data, size_t size)
                 }
                 break;
             }
-            case 7: //name
+            case 8: //name
                 ti.name.assign(reinterpret_cast<const char*>(data), size);
                 break;
             case 13: //raw
@@ -314,13 +344,25 @@ TensorInfo parse_TensorInfo(const uint8_t* data, size_t size)
     };
 
     parse_message(reader, on_simple, on_length_delimited);
-
+    /*
+    std::cout << "  float_data size = " << float_data.size() << "\n";
+    if (!float_data.empty()) {
+        std::cout << "  floats: ";
+        for (size_t i = 0; i < std::min(size_t(5), float_data.size()); ++i)
+            std::cout << float_data[i] << " ";
+        std::cout << "\n";
+    }
+    std::cout << "  parsed tensor: name=" << ti.name << " type=" << int(ti.data_type)
+          << " dims size=" << ti.dims.size() << " constant=" << ti.is_constant
+          << " raw_size=" << ti.raw_data.size() << "\n";
+    */
     if (ti.raw_data.empty())
     {
         if (!float_data.empty())
         {
             ti.raw_data.resize(float_data.size() * sizeof(float));
             std::memcpy(ti.raw_data.data(), float_data.data(), ti.raw_data.size());
+            //std::cout << "  copied float_data to raw_data, size=" << ti.raw_data.size() << "\n";
         }
         else if (!int32_data.empty())
         {
