@@ -46,6 +46,21 @@ using Attribute = std::variant<
     TensorInfo
 >;
 
+
+inline bool operator==(const TensorInfo& lhs, const TensorInfo& rhs)
+{
+    return lhs.name == rhs.name &&
+           lhs.dims == rhs.dims &&
+           lhs.data_type == rhs.data_type &&
+           lhs.is_constant == rhs.is_constant;
+}
+
+inline bool operator==(const Attribute& lhs, const Attribute& rhs)
+{
+    if (lhs.index() != rhs.index()) return false;
+    return std::visit([](const auto& a, const auto& b) -> bool { return a == b; }, lhs, rhs);
+}
+
 } // namespace graph
 
 #endif // GRAPH_TYPES_H

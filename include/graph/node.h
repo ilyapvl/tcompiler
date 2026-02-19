@@ -70,6 +70,16 @@ private:
     std::vector<std::string>            outputs_;       ///< Имена выходных тензоров
 };
 
+
+inline bool operator==(const Node& lhs, const Node& rhs)
+{
+    return lhs.name() == rhs.name() &&
+           lhs.op_type() == rhs.op_type() &&
+           lhs.inputs() == rhs.inputs() &&
+           lhs.outputs() == rhs.outputs() &&
+           lhs.attributes() == rhs.attributes();
+}
+
 } // namespace graph
 
 #endif // GRAPH_NODE_H

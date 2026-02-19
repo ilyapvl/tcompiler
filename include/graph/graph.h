@@ -99,7 +99,21 @@ private:
     std::vector<std::string>                            outputs_;       ///< Выходные тензоры
     std::map<std::string, std::string>                  producer_;      ///< Производители
     std::map<std::string, std::vector<std::string>>     consumers_;     ///< Потребители
+
+    friend bool operator==(const Graph& lhs, const Graph& rhs);
+
 };
+
+
+inline bool operator==(const Graph& lhs, const Graph& rhs)
+{
+    return lhs.nodes_ == rhs.nodes_ &&
+           lhs.tensors_ == rhs.tensors_ &&
+           lhs.inputs_ == rhs.inputs_ &&
+           lhs.outputs_ == rhs.outputs_ &&
+           lhs.producer_ == rhs.producer_ &&
+           lhs.consumers_ == rhs.consumers_;
+}
 
 } // namespace graph
 
