@@ -22,7 +22,7 @@ git clone https://github.com/ilyapvl/tcompiler.git
 cd tcompiler
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make
+make main
 ```
 
 ## Запуск
@@ -36,3 +36,16 @@ make
 ## Документация
 
 Doxygen документация проекта находится в ```tcompiler/html/index.html```
+
+
+## Тесты
+
+Проект содержит тесты для главных функций. Тестирование использует google test, эта библиотека загружается через FetchContent.
+Для запуска тестирования выполните 
+```
+cd tcompiler
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make
+ctest
+```
