@@ -5,7 +5,7 @@
 #include <graph/node.h>
 #include <string>
 #include <vector>
-#include <map>
+#include <unordered_map>
 #include <ostream>
 
 namespace graph
@@ -32,7 +32,7 @@ public:
     Node* get_node(const std::string& name);
 
     /// @return Ссылка на карту узлов.
-    const std::map<std::string, Node>& nodes() const { return nodes_; }
+    const std::unordered_map<std::string, Node>& nodes() const { return nodes_; }
 
 
     /**
@@ -47,7 +47,7 @@ public:
     TensorInfo* get_tensor(const std::string& name);
 
     /// @return Ссылка на карту тензоров
-    const std::map<std::string, TensorInfo>& tensors() const { return tensors_; }
+    const std::unordered_map<std::string, TensorInfo>& tensors() const { return tensors_; }
 
 
     /// @brief Добавить имя входного тензора
@@ -93,12 +93,12 @@ public:
 
 
 private:
-    std::map<std::string, Node>                         nodes_;         ///< Операции 
-    std::map<std::string, TensorInfo>                   tensors_;       ///< Тензоры
-    std::vector<std::string>                            inputs_;        ///< Входные тензоры
-    std::vector<std::string>                            outputs_;       ///< Выходные тензоры
-    std::map<std::string, std::string>                  producer_;      ///< Производители
-    std::map<std::string, std::vector<std::string>>     consumers_;     ///< Потребители
+    std::unordered_map<std::string, Node>                         nodes_;         ///< Операции 
+    std::unordered_map<std::string, TensorInfo>                   tensors_;       ///< Тензоры
+    std::vector<std::string>                                      inputs_;        ///< Входные тензоры
+    std::vector<std::string>                                      outputs_;       ///< Выходные тензоры
+    std::unordered_map<std::string, std::string>                  producer_;      ///< Производители
+    std::unordered_map<std::string, std::vector<std::string>>     consumers_;     ///< Потребители
 
     friend bool operator==(const Graph& lhs, const Graph& rhs);
 

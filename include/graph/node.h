@@ -4,7 +4,8 @@
 #include "graph/types.h"
 #include <string>
 #include <vector>
-#include <map>
+#include <unordered_map>
+
 
 namespace graph
 {
@@ -37,9 +38,9 @@ public:
     void set_op_type(const std::string& ot) { op_type_ = ot; }
 
     /// @return Ссылка на карту атрибутов
-    std::map<std::string, Attribute>& attributes() { return attributes_; }
+    std::unordered_map<std::string, Attribute>& attributes() { return attributes_; }
     /// @return Константная ссылка на карту атрибутов
-    const std::map<std::string, Attribute>& attributes() const { return attributes_; }
+    const std::unordered_map<std::string, Attribute>& attributes() const { return attributes_; }
 
     /**
      * @brief           Установить атрибут.
@@ -63,11 +64,11 @@ public:
     void add_output(const std::string& tensor_name) { outputs_.push_back(tensor_name); }
 
 private:
-    std::string                         name_;          ///< Имя узла
-    std::string                         op_type_;       ///< Тип операции
-    std::map<std::string, Attribute>    attributes_;    ///< Атрибуты операции
-    std::vector<std::string>            inputs_;        ///< Имена входных тензоров
-    std::vector<std::string>            outputs_;       ///< Имена выходных тензоров
+    std::string                                   name_;          ///< Имя узла
+    std::string                                   op_type_;       ///< Тип операции
+    std::unordered_map<std::string, Attribute>    attributes_;    ///< Атрибуты операции
+    std::vector<std::string>                      inputs_;        ///< Имена входных тензоров
+    std::vector<std::string>                      outputs_;       ///< Имена выходных тензоров
 };
 
 

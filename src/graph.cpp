@@ -7,7 +7,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <fstream>
-#include <map>
+#include <unordered_map>
 
 
 
@@ -237,7 +237,7 @@ void Graph::dump_dot(std::ostream& os) const
     os << "  rankdir=TB;\n";
     os << "  node [shape=record, fontname=\"Sans\"];\n";
 
-    static const std::map<std::string, std::vector<std::string>> input_names = {
+    static const std::unordered_map<std::string, std::vector<std::string>> input_names = {
         {"Conv",            {"X", "W", "B"}},
         {"Gemm",            {"A", "B", "C"}},
         {"Add",             {"A", "B"}},
@@ -322,7 +322,7 @@ void Graph::dump_dot(std::ostream& os) const
         return std::visit(Visitor{}, attr);
     };
 
-    std::map<std::string, std::string> tensor_id_map = {};
+    std::unordered_map<std::string, std::string> tensor_id_map = {};
     int tensor_counter = 0;
     int node_counter = 0;
 

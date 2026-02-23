@@ -7,6 +7,7 @@
 #include <utility>
 #include "graph/exceptions.h"
 #include "graph/types.h"
+#include <map>
 
 
 namespace graph
