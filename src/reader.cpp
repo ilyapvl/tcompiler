@@ -211,7 +211,7 @@ void ProtoReader::skip_group()
 
 TensorInfo parse_TensorInfo(const uint8_t* data, size_t size)
 {
-    std::cout << "Parsing TensorInfo at " << static_cast<const void*>(data) << " size " << size << "\n";
+    //std::cout << "Parsing TensorInfo at " << static_cast<const void*>(data) << " size " << size << "\n";
     ProtoReader reader(data, size);
     TensorInfo ti;
     ti.data_type = DataType::UNDEFINED;
