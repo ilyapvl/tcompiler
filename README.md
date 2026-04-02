@@ -84,7 +84,7 @@ The program also prints debug info:
 Example of graph visualizing:
 
 <p align="center">
-  <img src="docs/images/example_graph.svg" alt="graph" width="600">
+  <img src="docs/images/graphviz.svg" alt="graph" width="600">
   <br>
 </p>
 
