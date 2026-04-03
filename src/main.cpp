@@ -38,8 +38,8 @@ int main(int argc, char* argv[])
 
 
     const std::filesystem::path onnx_path = argv[1];
-    const std::filesystem::path dot_path  = (argc >= 3) ? argv[2] : "graph.dot";
-    const std::filesystem::path png_path  = (argc >= 4) ? argv[3] : "";
+    const std::filesystem::path dot_path  = "graph.dot";
+    //const std::filesystem::path png_path  = (argc >= 4) ? argv[3] : "";
 
     tc::MLIRGenOptions mlir_opts = tc::parseMLIROptions(argc, argv);
 
@@ -65,11 +65,11 @@ int main(int argc, char* argv[])
             std::cout << "  " << n->getOpStr() << "  " << n->getName() << "\n";
         std::cout << "\n";
 
-        /*
+        
         tc::DotExporter exporter;
         exporter.exportToFile(*graph, dot_path);
         std::cout << "DOT file written: " << dot_path << "\n";
-
+        /*
         if (!png_path.empty())
         {
             exporter.exportToPng(*graph, png_path);
