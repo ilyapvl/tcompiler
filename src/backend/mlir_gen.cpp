@@ -233,7 +233,37 @@ namespace tc
     
 
 
-
+    mlir::Value createConstantTensor(mlir::OpBuilder& builder, mlir::Location loc,
+                                    mlir::RankedTensorType type,
+                                    llvm::ArrayRef<mlir::Value> dynSizes,
+                                    double value)
+    {
+        mlir::Value constant;
+        auto elemType = type.getElementType();
+        
+        if (llvm::isa<mlir::FloatType>(elemType))
+        {
+            auto attr = builder.getFloatAttr(elemType, value);
+            constant = mlir::arith::ConstantOp::create(builder, loc, elemType, attr);
+        }
+        
+        else if (llvm::isa<mlir::IntegerType>(elemType))
+        {
+            auto attr = builder.getIntegerAttr(elemType, static_cast<int64_t>(value));
+            constant = mlir::arith::ConstantOp::create(builder, loc, elemType, attr);
+        }
+        
+        else
+        {
+            llvm::report_fatal_error("createConstantTensor: unsupported element type");
+        }
+        
+        auto empty = mlir::tensor::EmptyOp::create(builder, loc, type, dynSizes);
+        auto fill = mlir::linalg::FillOp::create(builder, loc, 
+                                                mlir::ValueRange{constant}, 
+                                                mlir::ValueRange{empty});
+        return fill.getResult(0);
+    }
 
 
     
@@ -309,6 +339,59 @@ namespace tc
 
         return mlir::AffineMap::get(outRank, 0, exprs, ctx);
     }
+
+
+
+
+
+
+    mlir::Value broadcastToShape(mlir::OpBuilder& builder, mlir::Location loc,
+                                mlir::Value input, mlir::RankedTensorType targetType,
+                                llvm::ArrayRef<mlir::Value> dynSizes)
+    {
+        auto inputType = llvm::cast<mlir::RankedTensorType>(input.getType());
+        if (inputType == targetType) return input;
+
+        auto inferredShape = inferBroadcastShape(inputType.getShape(), targetType.getShape());
+        if (inferredShape != llvm::to_vector(targetType.getShape()))
+        {
+            throw std::runtime_error("broadcastToShape: incompatible shapes");
+        }
+
+        unsigned targetRank = targetType.getRank();
+
+        auto ctx = builder.getContext();
+        auto inputMap = makeBroadcastMap(targetRank, inputType.getRank(), inputType.getShape(), ctx);
+        
+        auto identityMap = mlir::AffineMap::getMultiDimIdentityMap(targetRank, ctx);
+        auto empty = mlir::tensor::EmptyOp::create(builder, loc, targetType, dynSizes);
+
+        llvm::SmallVector<mlir::utils::IteratorType> iterators(targetRank, mlir::utils::IteratorType::parallel);
+        auto generic = mlir::linalg::GenericOp::create(builder,
+                                                        loc,
+                                                        targetType,
+                                                        mlir::ValueRange{input},
+                                                        mlir::ValueRange{empty},
+                                                        {inputMap, identityMap},
+                                                        iterators);
+        
+        mlir::OpBuilder::InsertionGuard guard(builder);
+
+        auto* block = builder.createBlock(&generic.getRegion());
+        block->addArgument(inputType.getElementType(), loc);
+        block->addArgument(targetType.getElementType(), loc);
+
+        builder.setInsertionPointToStart(block);
+
+        mlir::linalg::YieldOp::create(builder, loc, mlir::ValueRange{block->getArgument(0)});
+        
+        return generic.getResult(0);
+    }
+
+
+
+
+
 
 
 
@@ -575,12 +658,7 @@ namespace tc
             }
         }
 
-        auto emptyOut = mlir::tensor::EmptyOp::create(builder, loc, outType, dynOutSizes);
-
-        auto zeroAttr = builder.getZeroAttr(outType.getElementType());
-        auto zero = mlir::arith::ConstantOp::create(builder, loc, zeroAttr);
-        auto fill = mlir::linalg::FillOp::create(builder, loc, mlir::ValueRange{zero}, mlir::ValueRange{emptyOut});
-        mlir::Value initOut = fill->getResult(0);
+        auto initOut = createConstantTensor(builder, loc, outType, dynOutSizes, 0.0);
 
 
         // in linalg.generic all dimensions must be iterated
@@ -689,8 +767,6 @@ namespace tc
         
         return generic->getResult(0);
     }
-
-    
 
 
 
@@ -802,9 +878,63 @@ namespace tc
         // ── Gemm ──────────────────────────────────────────────────────────────────
         if (nodeType == OpType::Gemm)
         {
-            //TODO - Gemm
+            auto A = resolve(node.getInputs()[0]);
+            auto B = resolve(node.getInputs()[1]);
+
+            mlir::Value C = nullptr;
+
+            if (node.getInputs().size() >= 3 && !node.getInputs()[2].empty())
+                C = resolve(node.getInputs()[2]);
+
+            float alpha = 1.0f, beta = 1.0f;
+            bool transA = false, transB = false;
+
+            if (node.hasAttribute("alpha"))     alpha   = node.getAttribute("alpha").asFloat();
+            if (node.hasAttribute("beta"))      beta    = node.getAttribute("beta").asFloat();
+            if (node.hasAttribute("transA"))    transA  = node.getAttribute("transA").asInt() != 0;
+            if (node.hasAttribute("transB"))    transB  = node.getAttribute("transB").asInt() != 0;
+
+            // A[] * B[]
+            mlir::Value result = buildMatmulGeneric(builder, loc, A, B, transA, transB);
+            auto resultType = llvm::cast<mlir::RankedTensorType>(result.getType());
+
+            // dynamic dimensions
+            llvm::SmallVector<mlir::Value> dynSizes;
+            for (unsigned i = 0; i < resultType.getRank(); ++i)
+            {
+                if (resultType.isDynamicDim(i))
+                {
+                    dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, result, i));
+                }
+            }
+
+            // scale by alpha
+            if (std::abs(alpha - 1.0f) > 1e-6)
+            {
+                auto alphaTensor = createConstantTensor(builder, loc, resultType, dynSizes, alpha);
+                result = buildElementwiseGeneric(OpType::Mul, builder, loc, result, alphaTensor, &ctx_);
+            }
+
+            // + С * beta
+            if (C)
+            {
+                mlir::Value Cval = broadcastToShape(builder, loc, C, resultType, dynSizes);
+
+                // scaling C
+                if (std::abs(beta - 1.0f) > 1e-6)
+                {
+                    auto betaTensor = createConstantTensor(builder, loc, resultType, dynSizes, beta);
+                    Cval = buildElementwiseGeneric(OpType::Mul, builder, loc, Cval, betaTensor, &ctx_);
+                }
+
+                // result + C
+                result = buildElementwiseGeneric(OpType::Add, builder, loc, result, Cval, &ctx_);
+            }
+
+            vmap[node.getOutputs()[0]] = result;
             return;
         }
+        
 
         // ── Relu ──────────────────────────────────────────────────────────────────
         if (nodeType == OpType::Relu)
