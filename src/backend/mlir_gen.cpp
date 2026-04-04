@@ -403,10 +403,263 @@ namespace tc
         // ── MatMul ────────────────────────────────────────────────────────────────
         if (node.getOpType() == OpType::MatMul)
         {
-            //TODO - MatMul
 
+            auto lhs = resolve(node.getInputs()[0]);
+            auto rhs = resolve(node.getInputs()[1]);
+            auto lhsType = mlir::cast<mlir::RankedTensorType>(lhs.getType());
+            auto rhsType = mlir::cast<mlir::RankedTensorType>(rhs.getType());
+
+            unsigned lhsRank = lhsType.getRank();
+            unsigned rhsRank = rhsType.getRank();
+
+            if (lhsRank < 2 || rhsRank < 2)
+            {
+                throw std::runtime_error("MatMul: inputs must have rank at least 2");
+            }
+
+            // lhs [... x M x K], rhs [... x K x N]
+            int64_t M       = lhsType.getDimSize(lhsRank - 2);
+            int64_t K_lhs   = lhsType.getDimSize(lhsRank - 1);
+            int64_t K_rhs   = rhsType.getDimSize(rhsRank - 2);
+            int64_t N       = rhsType.getDimSize(rhsRank - 1);
+
+            if (K_lhs != K_rhs && K_lhs != mlir::ShapedType::kDynamic && K_rhs != mlir::ShapedType::kDynamic)
+            {
+                throw std::runtime_error("MatMul: inner dimension mismatch");
+            }
+
+
+
+
+            // first rank-2 dimensions 
+            llvm::SmallVector<int64_t> lhsBatch(lhsRank - 2);
+            llvm::SmallVector<int64_t> rhsBatch(rhsRank - 2);
+            for (unsigned i = 0; i < lhsRank - 2; ++i) lhsBatch[i] = lhsType.getDimSize(i);
+            for (unsigned i = 0; i < rhsRank - 2; ++i) rhsBatch[i] = rhsType.getDimSize(i);
+
+            // infer output shape
+            unsigned outBatchRank = std::max(lhsBatch.size(), rhsBatch.size());
+            llvm::SmallVector<int64_t> outBatchShape(outBatchRank);
+            for (unsigned i = 0; i < outBatchRank; ++i)
+            {
+                int lhsIdx = static_cast<int>(i) - static_cast<int>(outBatchRank - lhsBatch.size());
+                int rhsIdx = static_cast<int>(i) - static_cast<int>(outBatchRank - rhsBatch.size());
+
+                int64_t lhsDim = (lhsIdx >= 0) ? lhsBatch[lhsIdx] : 1;
+                int64_t rhsDim = (rhsIdx >= 0) ? rhsBatch[rhsIdx] : 1;
+
+                if (lhsDim == mlir::ShapedType::kDynamic || rhsDim == mlir::ShapedType::kDynamic)
+                    outBatchShape[i] = mlir::ShapedType::kDynamic;
+
+                else
+                    outBatchShape[i] = std::max(lhsDim, rhsDim);
+            }
+
+            llvm::SmallVector<int64_t> outShape = outBatchShape;
+            outShape.push_back(M);
+            outShape.push_back(N);
+            auto outType = mlir::RankedTensorType::get(outShape, lhsType.getElementType());
+
+            unsigned totalRank = outBatchRank + 2;
+
+
+            // in linalg.generic all dimensions must be iterated
+            // so reduction dimension K is added
+            
+
+            unsigned iterCount = totalRank + 1; // +1 для K
+
+
+            // build affine maps
+
+            // 0..batchRank-1: batch
+            // batchRank: M
+            // batchRank+1: N
+            // batchRank+2: K (reduction)
+
+            auto getDimExpr = [&](unsigned pos) { return mlir::getAffineDimExpr(pos, &ctx_); };
+
+            // lhs map
+            llvm::SmallVector<mlir::AffineExpr> lhsExprs;
+            for (unsigned i = 0; i < lhsBatch.size(); ++i)
+            {
+                unsigned outDim = i + (outBatchRank - lhsBatch.size());
+
+                if (lhsBatch[i] == 1)
+                    lhsExprs.push_back(mlir::getAffineConstantExpr(0, &ctx_));
+
+                else
+                    lhsExprs.push_back(getDimExpr(outDim));
+            }
+
+            lhsExprs.push_back(getDimExpr(outBatchRank)); // M
+            lhsExprs.push_back(getDimExpr(iterCount - 1)); // K
+
+            auto lhsMap = mlir::AffineMap::get(iterCount, 0, lhsExprs, &ctx_);
+
+
+
+
+            // rhs map:
+            llvm::SmallVector<mlir::AffineExpr> rhsExprs;
+            for (unsigned i = 0; i < rhsBatch.size(); ++i)
+            {
+                unsigned outDim = i + (outBatchRank - rhsBatch.size());
+                
+                if (rhsBatch[i] == 1)
+                    rhsExprs.push_back(mlir::getAffineConstantExpr(0, &ctx_));
+
+                else
+                    rhsExprs.push_back(getDimExpr(outDim));
+            }
+
+            rhsExprs.push_back(getDimExpr(iterCount - 1)); // K
+            rhsExprs.push_back(getDimExpr(outBatchRank + 1)); // N
+
+            auto rhsMap = mlir::AffineMap::get(iterCount, 0, rhsExprs, &ctx_);
+
+
+            llvm::SmallVector<mlir::AffineExpr> outExprs;
+            for (unsigned i = 0; i < totalRank; ++i)
+            {
+                outExprs.push_back(getDimExpr(i));
+            }
+
+
+            auto outMap = mlir::AffineMap::get(iterCount, 0, outExprs, &ctx_);
+
+
+            llvm::SmallVector<mlir::utils::IteratorType> iterators(iterCount, mlir::utils::IteratorType::parallel);
+            iterators.back() = mlir::utils::IteratorType::reduction;
+
+
+
+
+
+
+            // dynamic dimension output
+            llvm::SmallVector<mlir::Value> dynOutSizes;
+            for (unsigned i = 0; i < totalRank; ++i)
+            {
+                if (outShape[i] == mlir::ShapedType::kDynamic)
+                {
+                    mlir::Value source;
+                    unsigned srcDimIdx;
+
+                    if (i < outBatchRank)
+                    {
+                        // batch dimension
+                        int lhsIdx = i - (outBatchRank - lhsBatch.size());
+                        int rhsIdx = i - (outBatchRank - rhsBatch.size());
+
+                        if (lhsIdx >= 0 && lhsBatch[lhsIdx] == mlir::ShapedType::kDynamic)
+                        {
+                            source = lhs;
+                            srcDimIdx = static_cast<unsigned>(lhsIdx);
+                        }
+                        
+                        else if (rhsIdx >= 0 && rhsBatch[rhsIdx] == mlir::ShapedType::kDynamic)
+                        {
+                            source = rhs;
+                            srcDimIdx = static_cast<unsigned>(rhsIdx);
+                        }
+                        
+                        else
+                        {
+                            continue;
+                        }
+                    }
+                    
+                    else if (i == outBatchRank)
+                    {
+                        // M
+                        source = lhs;
+                        srcDimIdx = lhsRank - 2;
+                    }
+                    
+                    else if (i == outBatchRank + 1)
+                    {
+                        // N
+                        source = rhs;
+                        srcDimIdx = rhsRank - 1;
+                    }
+                    
+                    else
+                    {
+                        continue;
+                    }
+
+                    auto dim = mlir::tensor::DimOp::create(builder, loc, source, srcDimIdx);
+                    dynOutSizes.push_back(dim);
+                }
+            }
+            
+
+            auto out = mlir::tensor::EmptyOp::create(builder, loc, outType, dynOutSizes);
+
+            // init output with 0
+            auto zeroAttr = builder.getZeroAttr(outType.getElementType());
+            auto zero = mlir::arith::ConstantOp::create(builder, loc, zeroAttr);
+            auto fill = mlir::linalg::FillOp::create(builder, loc, mlir::ValueRange{zero}, mlir::ValueRange{out});
+            auto initOut = fill->getResult(0);
+
+            // create genericOp
+            auto generic = mlir::linalg::GenericOp::create(builder, loc,
+                                                        mlir::TypeRange{outType},
+                                                        mlir::ValueRange{lhs, rhs},
+                                                        mlir::ValueRange{initOut},
+                                                        llvm::SmallVector<mlir::AffineMap>{lhsMap, rhsMap, outMap},
+                                                        iterators);
+
+
+            // fill block
+            mlir::OpBuilder::InsertionGuard guard(builder);
+            mlir::Block *block = builder.createBlock(&generic.getRegion());
+
+            // lhs_elem, rhs_elem, out_elem
+            block->addArgument(lhsType.getElementType(), loc);
+            block->addArgument(rhsType.getElementType(), loc);
+            block->addArgument(outType.getElementType(), loc);
+            builder.setInsertionPointToStart(block);
+            
+            if (mlir::isa<mlir::FloatType>(outType.getElementType()))
+            {
+                auto mul = mlir::arith::MulFOp::create(builder, loc, block->getArgument(0), block->getArgument(1));
+                auto add = mlir::arith::AddFOp::create(builder, loc, block->getArgument(2), mul);
+                mlir::linalg::YieldOp::create(builder, loc, mlir::ValueRange{add});
+            }
+            
+            else if (mlir::isa<mlir::IntegerType>(outType.getElementType()))
+            {
+                auto mul = mlir::arith::MulIOp::create(builder, loc, block->getArgument(0), block->getArgument(1));
+                auto add = mlir::arith::AddIOp::create(builder, loc, block->getArgument(2), mul);
+                mlir::linalg::YieldOp::create(builder, loc, mlir::ValueRange{add});
+            }
+            
+            else
+            {
+                throw std::runtime_error("MatMul: unsupported element type");
+            }
+
+
+
+            vmap[node.getOutputs()[0]] = generic->getResult(0);
             return;
         }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
         // ── Gemm ──────────────────────────────────────────────────────────────────
         if (node.getOpType() == OpType::Gemm)
