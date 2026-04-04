@@ -82,6 +82,12 @@ namespace tc
 
         [[nodiscard]] mlir::Value makeWeightConstant(mlir::OpBuilder& builder, mlir::Location loc, const Tensor& weight) const;
         
+        mlir::Value buildMatmulGeneric(mlir::OpBuilder& builder,
+                                mlir::Location loc,
+                                mlir::Value A,
+                                mlir::Value B,
+                                const bool transA, const bool transB) const;
+
         static void runOptPipeline(mlir::ModuleOp mod);
         static void runLoweringPipeline(mlir::ModuleOp mod);
     };
