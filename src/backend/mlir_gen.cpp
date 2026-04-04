@@ -214,6 +214,34 @@ namespace tc
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
     llvm::SmallVector<int64_t> inferBroadcastShape( llvm::ArrayRef<int64_t> shape1, llvm::ArrayRef<int64_t> shape2)
     {
         unsigned rank1 = shape1.size();
@@ -354,16 +382,62 @@ namespace tc
 
 
 
+    template<typename ArithOp>
+    struct BodyEmitter
+    {
+        static void emit(mlir::OpBuilder& b, mlir::Location loc, mlir::Block* block)
+        {
+            auto result = ArithOp::create(b, loc, block->getArgument(0), block->getArgument(1));
+            mlir::linalg::YieldOp::create(b, loc, mlir::ValueRange{result});
+        }
+    };
 
+    void emitBody(OpType opType, mlir::OpBuilder& builder, mlir::Location loc, mlir::Block* block, mlir::Type elemType)
+    {
+        // float
+        if (mlir::isa<mlir::FloatType>(elemType))
+        {
+            if (opType == OpType::Add)
+                BodyEmitter<mlir::arith::AddFOp>::emit(builder, loc, block);
 
+            else if (opType == OpType::Mul)
+                BodyEmitter<mlir::arith::MulFOp>::emit(builder, loc, block);
+
+            else
+                throw std::runtime_error("emitBody: unsupported OpType for float");
+        }
+
+        // integer
+        else if (mlir::isa<mlir::IntegerType>(elemType))
+        {
+            if (opType == OpType::Add)
+                BodyEmitter<mlir::arith::AddIOp>::emit(builder, loc, block);
+
+            else if (opType == OpType::Mul)
+                BodyEmitter<mlir::arith::MulIOp>::emit(builder, loc, block);
+
+            else
+                throw std::runtime_error("emitBody: unsupported OpType for integer");
+        }
+
+        else
+        {
+            throw std::runtime_error("emitBody: unsupported element type");
+        }
+    }
 
     mlir::Value buildElementwiseGeneric(
+        OpType opType,
         mlir::OpBuilder& builder,
         mlir::Location loc,
         mlir::Value lhs,
         mlir::Value rhs,
-        std::function<mlir::Value(mlir::OpBuilder&, mlir::Location, mlir::Value, mlir::Value)> block_builder)
+        mlir::MLIRContext* ctx)                                  
     {
+
+        if (opType != OpType::Add && opType != OpType::Mul)
+            throw std::runtime_error("buildElementwiseGeneric only supports Add and Mul");
+
         auto lhsType = mlir::cast<mlir::RankedTensorType>(lhs.getType());
         auto rhsType = mlir::cast<mlir::RankedTensorType>(rhs.getType());
         auto elemType = lhsType.getElementType();
@@ -381,9 +455,9 @@ namespace tc
         auto emptyOut = mlir::tensor::EmptyOp::create(builder, loc, outType, dynSizes);
 
         // affine maps
-        auto lhsMap = makeBroadcastMap(outShape.size(), lhsType.getRank(), lhsType.getShape(), builder.getContext());
-        auto rhsMap = makeBroadcastMap(outShape.size(), rhsType.getRank(), rhsType.getShape(), builder.getContext());
-        auto outMap = mlir::AffineMap::getMultiDimIdentityMap(outShape.size(), builder.getContext());
+        auto lhsMap = makeBroadcastMap(outShape.size(), lhsType.getRank(), lhsType.getShape(), ctx);
+        auto rhsMap = makeBroadcastMap(outShape.size(), rhsType.getRank(), rhsType.getShape(), ctx);
+        auto outMap = mlir::AffineMap::getMultiDimIdentityMap(outShape.size(), ctx);
 
         llvm::SmallVector<mlir::utils::IteratorType> iterators(outShape.size(), mlir::utils::IteratorType::parallel);
 
@@ -393,22 +467,22 @@ namespace tc
                                                     {lhsMap, rhsMap, outMap},
                                                     iterators);
 
+
         mlir::OpBuilder::InsertionGuard guard(builder);
 
         mlir::Block* block = builder.createBlock(&generic.getRegion());
-        block->addArgument(elemType, loc);
-        block->addArgument(elemType, loc);
-        block->addArgument(elemType, loc);
+        block->addArguments({elemType, elemType, elemType}, {loc, loc, loc});
 
         builder.setInsertionPointToStart(block);
 
-        auto result = block_builder(builder, loc, block->getArgument(0), block->getArgument(1));
-        mlir::linalg::YieldOp::create(builder, loc, result);
-        
+        emitBody(opType, builder, loc, block, elemType);
+
         return generic->getResult(0);
     }
 
-    
+
+
+
 
 
 
@@ -620,6 +694,21 @@ namespace tc
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     
     void MLIRGen::processNode(mlir::OpBuilder& builder,
                             const Node&      node,
@@ -627,6 +716,7 @@ namespace tc
                             const Graph&     graph) const
     {
         auto loc = builder.getUnknownLoc();
+        auto nodeType = node.getOpType();
 
         // get data by tensor name
         auto resolve = [&](const std::string& name) -> mlir::Value
@@ -672,61 +762,18 @@ namespace tc
 
 
         // ── Add / Mul ───────────────────────────────────────────────────────────────────
-        if (node.getOpType() == OpType::Add || node.getOpType() == OpType::Mul)
+        if (nodeType == OpType::Add || nodeType == OpType::Mul)
         {
             auto lhs = resolve(node.getInputs()[0]);
             auto rhs = resolve(node.getInputs()[1]);
-            auto lhsType = mlir::cast<mlir::RankedTensorType>(lhs.getType());
-            auto rhsType = mlir::cast<mlir::RankedTensorType>(rhs.getType());    
 
-            // use simple linalg if dimensions are equal
-            if (lhsType == rhsType)
-            {
-                auto out = createEmpyWithShapeLike(lhs);
-                mlir::Operation *op = nullptr;
 
-                if (node.getOpType() == OpType::Add)
-                {
-                    op = mlir::linalg::AddOp::create(builder, loc,
-                                                    mlir::TypeRange{lhsType},
-                                                    mlir::ValueRange{lhs, rhs},
-                                                    mlir::ValueRange{out});
-                }
+            //always use generic build //TODO - straight generation when same shapes
 
-                else
-                {
-                    op = mlir::linalg::MulOp::create(builder, loc,
-                                                    mlir::TypeRange{lhsType},
-                                                    mlir::ValueRange{lhs, rhs},
-                                                    mlir::ValueRange{out});
 
-                }
-
-                vmap[node.getOutputs()[0]] = op->getResult(0);
-                return;
-            }
-
-            auto block_builder = [&](mlir::OpBuilder& b, mlir::Location loc, mlir::Value l, mlir::Value r) -> mlir::Value
-            {
-                if (node.getOpType() == OpType::Add)
-                {
-                    if (mlir::isa<mlir::FloatType>(l.getType()))
-                        return mlir::arith::AddFOp::create(b, loc, l, r);
-                    else
-                        return mlir::arith::AddIOp::create(b, loc, l, r);
-                }
-                
-                else if (node.getOpType() == OpType::Mul)
-                {
-                    if (mlir::isa<mlir::FloatType>(l.getType()))
-                        return mlir::arith::MulFOp::create(b, loc, l, r);
-                    else
-                        return mlir::arith::MulIOp::create(b, loc, l, r);
-                }
-            };
-
-            auto result = buildElementwiseGeneric(builder, loc, lhs, rhs, block_builder);
+            auto result = buildElementwiseGeneric(nodeType, builder, loc, lhs, rhs, &ctx_);
             vmap[node.getOutputs()[0]] = result;
+        
             return;
         }
 
@@ -734,8 +781,11 @@ namespace tc
 
 
 
+
+
+
         // ── MatMul ────────────────────────────────────────────────────────────────
-        if (node.getOpType() == OpType::MatMul)
+        if (nodeType == OpType::MatMul)
         {
             auto A = resolve(node.getInputs()[0]);
             auto B = resolve(node.getInputs()[1]);
@@ -750,21 +800,21 @@ namespace tc
 
 
         // ── Gemm ──────────────────────────────────────────────────────────────────
-        if (node.getOpType() == OpType::Gemm)
+        if (nodeType == OpType::Gemm)
         {
             //TODO - Gemm
             return;
         }
 
         // ── Relu ──────────────────────────────────────────────────────────────────
-        if (node.getOpType() == OpType::Relu)
+        if (nodeType == OpType::Relu)
         {
             //TODO - Relu
             return;
         }
 
         // ── Conv2d ────────────────────────────────────────────────────────────────
-        if (node.getOpType() == OpType::Conv)
+        if (nodeType == OpType::Conv)
         {
             //TODO - Conv
             return;
