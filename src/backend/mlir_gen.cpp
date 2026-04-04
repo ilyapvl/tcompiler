@@ -774,6 +774,94 @@ namespace tc
 
 
 
+    static mlir::Value makeZeroConstant(mlir::OpBuilder& builder, mlir::Location loc, mlir::Type elemType)
+    {
+        if (llvm::isa<mlir::FloatType>(elemType))
+        {
+            auto attr = builder.getFloatAttr(elemType, 0.0);
+            return mlir::arith::ConstantOp::create(builder, loc, elemType, attr);
+        }
+        
+        else if (llvm::isa<mlir::IntegerType>(elemType))
+        {
+            auto attr = builder.getIntegerAttr(elemType, 0);
+            return mlir::arith::ConstantOp::create(builder, loc, elemType, attr);
+        }
+        
+        else
+        {
+            throw std::runtime_error("makeZeroConstant: unsupported element type");
+        }
+    }
+
+
+    mlir::Value buildReLUGeneric(mlir::OpBuilder& builder, mlir::Location loc, mlir::Value input, mlir::MLIRContext* ctx)
+    {
+        auto inputType = llvm::cast<mlir::RankedTensorType>(input.getType());
+        auto elemType = inputType.getElementType();
+        unsigned rank = inputType.getRank();
+
+        auto outType = inputType;
+
+        // dynamic dimensions
+        llvm::SmallVector<mlir::Value> dynSizes;
+        for (unsigned i = 0; i < rank; ++i)
+        {
+            if (inputType.isDynamicDim(i))
+            {
+                dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, input, i));
+            }
+        }
+
+        auto emptyOut = mlir::tensor::EmptyOp::create(builder, loc, outType, dynSizes);
+
+        // affine maps
+        auto identityMap = mlir::AffineMap::getMultiDimIdentityMap(rank, ctx);
+        llvm::SmallVector<mlir::utils::IteratorType> iterators(rank, mlir::utils::IteratorType::parallel);
+
+        auto generic = mlir::linalg::GenericOp::create(builder,
+                                                        loc,
+                                                        outType,
+                                                        mlir::ValueRange{input},
+                                                        mlir::ValueRange{emptyOut},
+                                                        {identityMap, identityMap},
+                                                        iterators);
+
+        
+        mlir::OpBuilder::InsertionGuard guard(builder);
+        
+        auto* block = builder.createBlock(&generic.getRegion());
+        block->addArgument(elemType, loc);
+        block->addArgument(elemType, loc);
+
+        builder.setInsertionPointToStart(block);
+
+        auto zero = makeZeroConstant(builder, loc, elemType);
+        mlir::Value result;
+
+        if (llvm::isa<mlir::FloatType>(elemType))
+        {
+            result = mlir::arith::MaximumFOp::create(builder, loc, block->getArgument(0), zero);
+        }
+        
+        else if (llvm::isa<mlir::IntegerType>(elemType))
+        {
+            result = mlir::arith::MaxSIOp::create(builder, loc, block->getArgument(0), zero);
+        }
+        
+        else
+        {
+            throw std::runtime_error("ReLU: unsupported element type");
+        }
+
+        mlir::linalg::YieldOp::create(builder, loc, mlir::ValueRange{result});
+        
+
+        return generic.getResult(0);
+    }
+
+
+
 
 
 
@@ -939,7 +1027,10 @@ namespace tc
         // ── Relu ──────────────────────────────────────────────────────────────────
         if (nodeType == OpType::Relu)
         {
-            //TODO - Relu
+            auto input = resolve(node.getInputs()[0]);
+            auto result = buildReLUGeneric(builder, loc, input, &ctx_);
+            vmap[node.getOutputs()[0]] = result;
+
             return;
         }
 
