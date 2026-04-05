@@ -873,6 +873,436 @@ namespace tc
 
 
 
+
+
+    mlir::Value buildShapeOp(mlir::OpBuilder& builder,
+                            mlir::Location loc,
+                            mlir::Value input,
+                            int64_t start = 0,
+                            int64_t end   = std::numeric_limits<int64_t>::max())
+    {
+        auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+        int64_t rank   = static_cast<int64_t>(inputType.getRank());
+
+        // normalizing
+        if (start < 0) start += rank;
+        if (end != std::numeric_limits<int64_t>::max() && end < 0) end += rank;
+        if (end == std::numeric_limits<int64_t>::max()) end = rank;
+
+        start = std::clamp(start, int64_t(0), rank);
+        end = std::clamp(end,   int64_t(0), rank);
+
+        int64_t numDims = std::max(int64_t(0), end - start);
+
+        auto i64Type = builder.getI64Type();
+        auto outType = mlir::RankedTensorType::get({numDims}, i64Type);
+
+        if (numDims == 0)
+        {
+            return mlir::tensor::EmptyOp::create(builder, loc, outType, mlir::ValueRange{}).getResult();
+        }
+
+        llvm::SmallVector<mlir::Value> dimValues;
+        dimValues.reserve(numDims);
+
+        for (int64_t i = start; i < end; ++i)
+        {
+            auto dimOp  = mlir::tensor::DimOp::create(builder, loc, input, static_cast<unsigned>(i));
+            auto castOp = mlir::arith::IndexCastOp::create(builder, loc, i64Type, dimOp.getResult());
+            dimValues.push_back(castOp.getResult());
+        }
+
+        return mlir::tensor::FromElementsOp::create(builder, loc, outType, dimValues).getResult();
+    }
+
+
+
+    // ── Shape inference ───────────────────────────────────────────────────────────────────
+
+
+
+    // folding Value to int64 through operation graph (arith + tensor)
+    static std::optional<int64_t> foldToInt(mlir::Value v)
+    {
+        if (mlir::APInt val; mlir::matchPattern(v, mlir::m_ConstantInt(&val)))
+            return val.getSExtValue();
+
+        if (auto constIdx = v.getDefiningOp<mlir::arith::ConstantIndexOp>())
+            return constIdx.value();
+
+        // arith.addi both operands must be const
+        if (auto add = v.getDefiningOp<mlir::arith::AddIOp>())
+        {
+            auto lhs = foldToInt(add.getLhs());
+            auto rhs = foldToInt(add.getRhs());
+
+            if (lhs && rhs) return *lhs + *rhs;
+        }
+
+        // arith.index_cast
+        if (auto cast = v.getDefiningOp<mlir::arith::IndexCastOp>())
+            return foldToInt(cast.getIn());
+
+        // arith.index_castui
+        if (auto cast = v.getDefiningOp<mlir::arith::IndexCastUIOp>())
+            return foldToInt(cast.getIn());
+
+        return std::nullopt;
+    }
+
+    // infer an in64_t value from a tensor, std::nullopt if can't
+    static std::optional<int64_t> tryGetConstShapeElem(mlir::Value tensor, int64_t elemIdx)
+    {
+        // dense constant
+        if (mlir::DenseIntElementsAttr dense; mlir::matchPattern(tensor, mlir::m_Constant(&dense)))
+        {
+            auto vals = dense.getValues<int64_t>();
+            if (elemIdx >= 0 && elemIdx < (int64_t)vals.size())
+                return vals[elemIdx];
+            return std::nullopt;
+        }
+
+        // tensor.from_elements
+        if (auto fe = tensor.getDefiningOp<mlir::tensor::FromElementsOp>())
+        {
+            auto elems = fe.getElements();
+            if (elemIdx >= 0 && elemIdx < (int64_t)elems.size())
+                return foldToInt(elems[elemIdx]);
+
+            return std::nullopt;
+        }
+
+        // tensor.insert_slice
+        if (auto ins = tensor.getDefiningOp<mlir::tensor::InsertSliceOp>())
+        {
+            int64_t offset = mlir::ShapedType::kDynamic;
+            {
+                auto staticOff = ins.getStaticOffsets();
+
+                if (!staticOff.empty() && staticOff[0] != mlir::ShapedType::kDynamic)
+                {
+                    offset = staticOff[0];
+                }
+
+                else
+                {
+                    // dynamic offset
+                    auto dynOff = ins.getOffsets(); // ValueRange
+
+                    if (!dynOff.empty())
+                        if (auto v = foldToInt(dynOff[0])) offset = *v;
+                }
+            }
+
+            if (offset == mlir::ShapedType::kDynamic)
+                return std::nullopt;
+
+            int64_t sliceSize = mlir::ShapedType::kDynamic;
+            {
+                auto staticSz = ins.getStaticSizes();
+                if (!staticSz.empty() &&
+                    staticSz[0] != mlir::ShapedType::kDynamic)
+                {
+                    sliceSize = staticSz[0];
+                }
+            }
+            if (sliceSize == mlir::ShapedType::kDynamic)
+                return std::nullopt;
+
+            if (elemIdx >= offset && elemIdx < offset + sliceSize)
+                return tryGetConstShapeElem(ins.getSource(), elemIdx - offset); // element is inside the inserted
+
+            else
+                return tryGetConstShapeElem(ins.getDest(), elemIdx); // element is from the initial tensor
+        }
+
+
+        // tensor.concat
+        if (auto concat = tensor.getDefiningOp<mlir::tensor::ConcatOp>())
+        {
+            int64_t offset = 0;
+            for (mlir::Value inp : concat.getInputs())
+            {
+                auto inpType = mlir::cast<mlir::RankedTensorType>(inp.getType());
+                int64_t inpSize = inpType.getDimSize(0);
+
+                if (inpSize == mlir::ShapedType::kDynamic)
+                    return std::nullopt;
+
+                if (elemIdx < offset + inpSize)
+                    return tryGetConstShapeElem(inp, elemIdx - offset);
+
+                offset += inpSize;
+            }
+            return std::nullopt;
+        }
+
+        return std::nullopt;
+    }
+
+
+
+    mlir::Value buildReshapeOp(mlir::OpBuilder& builder, mlir::Location loc, mlir::Value data, mlir::Value shape, bool allowZero = false)
+    {
+        auto dataType  = mlir::cast<mlir::RankedTensorType>(data.getType());
+        auto shapeType = mlir::cast<mlir::RankedTensorType>(shape.getType());
+        auto elemType  = dataType.getElementType();
+        auto indexType = builder.getIndexType();
+
+        if (shapeType.getRank() != 1)
+            throw std::runtime_error("Reshape: shape must have exactly one dimension");
+
+        int64_t inRank  = dataType.getRank();
+        int64_t outRank = shapeType.getDimSize(0);
+
+        if (outRank == mlir::ShapedType::kDynamic)
+            throw std::runtime_error("Reshape: rank of the output tensor must be compile-time computed");
+
+
+        // get consts from shape tensor
+        enum class DimKind { Literal, Copy, Infer, PassThrough };
+
+        struct DimInfo
+        {
+            DimKind kind;
+            int64_t value = 0; // size for Literal, axis for Copy
+        };
+
+        llvm::SmallVector<DimInfo> dimInfos(outRank);
+        int64_t inferIdx = -1;
+
+        for (int64_t i = 0; i < outRank; ++i)
+        {
+            auto maybeVal = tryGetConstShapeElem(shape, i);
+
+            if (!maybeVal)
+            {
+                // failed to fold
+                dimInfos[i] = {DimKind::PassThrough, 0};
+                continue;
+            }
+
+            int64_t v = *maybeVal;
+
+            if (v == -1)
+            {
+                if (inferIdx >= 0)
+                    throw std::runtime_error("Reshape: no more than one '-1' dimension");
+
+                inferIdx = i;
+
+                dimInfos[i] = {DimKind::Infer, -1};
+            }
+            
+            else if (v == 0 && !allowZero)
+            {
+                if (i >= inRank)
+                    throw std::runtime_error("Reshape: '0' dim index bigger than input rank");
+
+                dimInfos[i] = {DimKind::Copy, i};
+            }
+
+            else if (v >= 0)
+            {
+                dimInfos[i] = {DimKind::Literal, v};
+            }
+
+            else
+            {
+                throw std::runtime_error("Reshape: invalid value " + std::to_string(v));
+            }
+        }
+
+
+        // static calculation of output shape
+        llvm::SmallVector<bool> inputConsumed(inRank, false);
+        int64_t literalProduct = 1;
+
+        for (int64_t i = 0; i < outRank; ++i)
+        {
+            const auto& d = dimInfos[i];
+
+            if (d.kind == DimKind::Copy)
+                inputConsumed[d.value] = true;
+
+            else if (d.kind == DimKind::Literal)
+                literalProduct *= d.value;
+        }
+
+        // all consumed dimensions
+        for (int64_t i = 0; i < outRank; ++i)
+        {
+            if (dimInfos[i].kind == DimKind::PassThrough && i < inRank)
+                inputConsumed[i] = true;
+        }
+
+        int64_t unconsumedStaticProduct = 1;
+        bool hasUncancelledDynamic   = false;
+
+        for (int64_t d = 0; d < inRank; ++d)
+        {
+            if (inputConsumed[d]) continue;
+
+            int64_t s = dataType.getDimSize(d);
+
+            if (s == mlir::ShapedType::kDynamic)
+                hasUncancelledDynamic = true;
+
+            else
+                unconsumedStaticProduct *= s;
+        }
+
+        // output type
+        llvm::SmallVector<int64_t> outShape(outRank, mlir::ShapedType::kDynamic);
+
+        for (int64_t i = 0; i < outRank; ++i)
+        {
+            switch (dimInfos[i].kind)
+            {
+
+                case DimKind::Literal:
+                    outShape[i] = dimInfos[i].value;
+                    break;
+
+                case DimKind::Copy:
+                    outShape[i] = dataType.getDimSize(dimInfos[i].value);
+                    break;
+
+                case DimKind::Infer:
+                    if (!hasUncancelledDynamic)
+                        outShape[i] = (literalProduct != 0) ? (unconsumedStaticProduct / literalProduct) : 0;
+                    break;
+
+                case DimKind::PassThrough:
+                    outShape[i] = mlir::ShapedType::kDynamic;
+
+                    break;
+            }
+        }
+
+        auto outType = mlir::RankedTensorType::get(outShape, elemType);
+
+
+        // build index-values for tensor.reshape
+        auto shapeIdxType = mlir::RankedTensorType::get({outRank}, indexType);
+        llvm::SmallVector<mlir::Value> idxVals(outRank, nullptr);
+
+        auto buildTotalElems = [&]() -> mlir::Value
+        {
+            mlir::Value total = mlir::arith::ConstantIndexOp::create(builder, loc, 1).getResult();
+
+            for (int64_t d = 0; d < inRank; ++d)
+            {
+                mlir::Value dv = mlir::tensor::DimOp::create(builder, loc, data, static_cast<unsigned>(d)).getResult();
+                total = mlir::arith::MulIOp::create(builder, loc, total, dv).getResult();
+            }
+
+            return total;
+        };
+
+        // first pass: Literal, Copy, PassThrough
+        mlir::Value dynKnownProd = mlir::arith::ConstantIndexOp::create(builder, loc, 1).getResult();
+
+        for (int64_t i = 0; i < outRank; ++i)
+        {
+            const auto& d = dimInfos[i];
+
+            switch (d.kind)
+            {
+                case DimKind::Literal:
+                    idxVals[i] = mlir::arith::ConstantIndexOp::create(builder, loc, d.value).getResult();
+                    break;
+
+                case DimKind::Copy:
+                    idxVals[i] = mlir::tensor::DimOp::create(builder, loc, data, static_cast<unsigned>(d.value)).getResult();
+                    break;
+
+                case DimKind::PassThrough:
+                {
+                    // from shape tensor
+                    mlir::Value idx = mlir::arith::ConstantIndexOp::create(builder, loc, i).getResult();
+
+                    mlir::Value elem = mlir::tensor::ExtractOp::create(builder, loc, shape,mlir::ValueRange{idx}).getResult();
+
+                    idxVals[i] = mlir::arith::IndexCastOp::create(builder, loc, indexType, elem).getResult();
+                    break;
+                }
+
+                case DimKind::Infer:
+                    break;
+            }
+
+            if (d.kind != DimKind::Infer)
+            {
+                dynKnownProd = mlir::arith::MulIOp::create(
+                                builder, loc, dynKnownProd, idxVals[i]).getResult();
+            }
+        }
+
+        // second pass
+        if (inferIdx >= 0)
+        {
+            if (!hasUncancelledDynamic)
+            {
+                // static
+                idxVals[inferIdx] = mlir::arith::ConstantIndexOp::create(builder, loc, outShape[inferIdx]).getResult();
+            }
+            
+            else
+            {
+                // dynamic: totalElems / dynLnownProd
+                mlir::Value total = buildTotalElems();
+                idxVals[inferIdx] = mlir::arith::DivUIOp::create(builder, loc, total, dynKnownProd).getResult();
+            }
+        }
+
+        // build tensor.reshape
+        mlir::Value shapeIdxTensor = mlir::tensor::FromElementsOp::create(builder, loc, shapeIdxType, idxVals).getResult();
+
+        return mlir::tensor::ReshapeOp::create(builder, loc, outType, data, shapeIdxTensor).getResult();
+    }
+
+
+
+
+
+
+
+
+
+
+    mlir::Value buildConcatOp(mlir::OpBuilder& builder, mlir::Location loc, llvm::ArrayRef<mlir::Value> inputs, int64_t axis)
+    {
+        auto firstType = mlir::cast<mlir::RankedTensorType>(inputs[0].getType());
+        int64_t rank = firstType.getRank();
+
+        if (axis < 0) axis += rank;
+        if (axis < 0 || axis >= rank)
+            throw std::runtime_error("Concat: invalid axis");
+
+        for (auto inp : inputs)
+        {
+            auto t = mlir::cast<mlir::RankedTensorType>(inp.getType());
+            if (t.getRank() != rank)
+                throw std::runtime_error("Concat: all inputs must share same rank");
+        }
+
+        // tensor.concat
+        auto concatOp = mlir::tensor::ConcatOp::create(builder, loc, axis, inputs);
+        return concatOp.getResult();
+    }
+
+
+
+
+
+
+
+
+
+
+
+
     
     void MLIRGen::processNode(mlir::OpBuilder& builder,
                             const Node&      node,
@@ -1033,6 +1463,65 @@ namespace tc
 
             return;
         }
+        
+
+
+        // ── Shape ─────────────────────────────────────────────────────────────────
+        if (nodeType == OpType::Shape)
+        {
+            auto input = resolve(node.getInputs()[0]);
+
+            int64_t start = 0;
+            int64_t end = std::numeric_limits<int64_t>::max();
+
+            if (node.hasAttribute("start"))
+                start = node.getAttribute("start").asInt();
+
+            if (node.hasAttribute("end"))
+                end = node.getAttribute("end").asInt();
+
+            auto result = buildShapeOp(builder, loc, input, start, end);
+            vmap[node.getOutputs()[0]] = result;
+
+            return;
+        }
+
+
+        // ── Reshape ───────────────────────────────────────────────────────────────
+        if (nodeType == OpType::Reshape)
+        {
+            auto data = resolve(node.getInputs()[0]);
+            auto shape = resolve(node.getInputs()[1]);
+
+            bool allowZero = false;
+
+            if (node.hasAttribute("allowzero"))
+                allowZero = node.getAttribute("allowzero").asInt() != 0;
+
+            auto result = buildReshapeOp(builder, loc, data, shape, allowZero);
+            vmap[node.getOutputs()[0]] = result;
+
+            return;
+        }
+
+
+        // ── Concat ────────────────────────────────────────────────────────────────
+        if (nodeType == OpType::Concat)
+        {
+            int64_t axis = node.getAttribute("axis").asInt();
+
+            llvm::SmallVector<mlir::Value> inputs;
+            inputs.reserve(node.getInputs().size());
+
+            for (const auto& inputName : node.getInputs())
+                inputs.push_back(resolve(inputName));
+
+            auto result = buildConcatOp(builder, loc, inputs, axis);
+            vmap[node.getOutputs()[0]] = result;
+
+            return;
+        }
+
 
         // ── Conv2d ────────────────────────────────────────────────────────────────
         if (nodeType == OpType::Conv)

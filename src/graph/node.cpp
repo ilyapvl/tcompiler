@@ -9,12 +9,15 @@ namespace tc
     OpType opTypeFromString(const std::string& s)
     {
         static const std::unordered_map<std::string, OpType> table = {
-            {"Add",    OpType::Add},
-            {"Mul",    OpType::Mul},
-            {"MatMul", OpType::MatMul},
-            {"Gemm",   OpType::Gemm},
-            {"Conv",   OpType::Conv},
-            {"Relu",   OpType::Relu},
+            {"Add",         OpType::Add},
+            {"Mul",         OpType::Mul},
+            {"MatMul",      OpType::MatMul},
+            {"Gemm",        OpType::Gemm},
+            {"Conv",        OpType::Conv},
+            {"Relu",        OpType::Relu},
+            {"Shape",       OpType::Shape},
+            {"Reshape",     OpType::Reshape},
+            {"Concat",     OpType::Concat},
         };
 
         
@@ -26,14 +29,17 @@ namespace tc
     {
         switch (op)
         {
-            case OpType::Add:    return "Add";
-            case OpType::Mul:    return "Mul";
-            case OpType::MatMul: return "MatMul";
-            case OpType::Gemm:   return "Gemm";
-            case OpType::Conv:   return "Conv";
-            case OpType::Relu:   return "Relu";
-            case OpType::Other:  return "Other";
-            default:             return "Unknown";
+            case OpType::Add:       return "Add";
+            case OpType::Mul:       return "Mul";
+            case OpType::MatMul:    return "MatMul";
+            case OpType::Gemm:      return "Gemm";
+            case OpType::Conv:      return "Conv";
+            case OpType::Relu:      return "Relu";
+            case OpType::Shape:     return "Shape";
+            case OpType::Reshape:   return "Reshape";
+            case OpType::Concat:    return "Concat";
+            case OpType::Other:     return "Other";
+            default:                return "Unknown";
         }
     }
 

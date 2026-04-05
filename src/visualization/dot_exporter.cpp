@@ -14,13 +14,17 @@ namespace tc
     {
         switch (op)
         {
-            case OpType::Conv:   return "#AED6F1";
-            case OpType::Relu:   return "#A9DFBF";
-            case OpType::Add:    return "#F9E79F";
-            case OpType::Mul:    return "#F5CBA7";
-            case OpType::MatMul: return "#D7BDE2";
-            case OpType::Gemm:   return "#C39BD3";
-            default:             return "#E8E8E8";
+            case OpType::Conv:      return "#AED6F1";
+            case OpType::Relu:      return "#A9DFBF";
+            case OpType::Add:       return "#F9E79F";
+            case OpType::Mul:       return "#F5CBA7";
+            case OpType::MatMul:    return "#D7BDE2";
+            case OpType::Gemm:      return "#C39BD3";
+            case OpType::Shape:     return "#A99BD3";
+            case OpType::Reshape:   return "#394B43";
+            case OpType::Concat:    return "#A9DF1F";
+            
+            default:                return "#E8E8E8";
         }
     }
 
