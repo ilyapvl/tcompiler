@@ -90,10 +90,10 @@ namespace tc
             case DataType::FLOAT:   return mlir::Float32Type::get(ctx);
             case DataType::DOUBLE:  return mlir::Float64Type::get(ctx);
             case DataType::FLOAT16: return mlir::Float16Type::get(ctx);
-            case DataType::INT8:    return mlir::IntegerType::get(ctx,  8, mlir::IntegerType::Signed);
-            case DataType::INT16:   return mlir::IntegerType::get(ctx, 16, mlir::IntegerType::Signed);
-            case DataType::INT32:   return mlir::IntegerType::get(ctx, 32, mlir::IntegerType::Signed);
-            case DataType::INT64:   return mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Signed);
+            case DataType::INT8:    return mlir::IntegerType::get(ctx,  8);
+            case DataType::INT16:   return mlir::IntegerType::get(ctx, 16);
+            case DataType::INT32:   return mlir::IntegerType::get(ctx, 32);
+            case DataType::INT64:   return mlir::IntegerType::get(ctx, 64);
             case DataType::UINT8:   return mlir::IntegerType::get(ctx,  8, mlir::IntegerType::Unsigned);
             case DataType::BOOL:    return mlir::IntegerType::get(ctx,  1);
             default:                return mlir::Float32Type::get(ctx);
@@ -321,18 +321,17 @@ namespace tc
 
         llvm::SmallVector<mlir::AffineExpr> exprs;
 
-        for (unsigned int i = 0; i < outRank; ++i)
+        for (unsigned int i = 0; i < operandRank; ++i)
         {
-            int idx = static_cast<int>(i) - static_cast<int>(outRank - operandRank);
-
-            if (idx < 0 || (idx < (int)operandRank && operandShape[idx] == 1))
+            int iterIdx = static_cast<int>(i) - static_cast<int>(operandRank - outRank);
+            if (iterIdx < 0 || (iterIdx < (int)operandRank && operandShape[iterIdx] == 1))
             {
                 exprs.push_back(mlir::getAffineConstantExpr(0, ctx));
             }
             
             else
             {
-                exprs.push_back(mlir::getAffineDimExpr(i, ctx));
+                exprs.push_back(mlir::getAffineDimExpr(iterIdx, ctx));
             }
         }
 
@@ -873,6 +872,7 @@ namespace tc
 
 
 
+
     
     void MLIRGen::processNode(mlir::OpBuilder& builder,
                             const Node&      node,
@@ -954,7 +954,7 @@ namespace tc
             auto A = resolve(node.getInputs()[0]);
             auto B = resolve(node.getInputs()[1]);
 
-            
+            //TODO - if 2D or 3D use linalg.batch_matmul
             auto result = buildMatmulGeneric(builder, loc, A, B, false, false);
             vmap[node.getOutputs()[0]] = result;
             return;
@@ -1111,8 +1111,7 @@ namespace tc
 
         mlir::func::ReturnOp::create(builder, builder.getUnknownLoc(), ret_vals);
 
-        if (mlir::failed(mlir::verify(module)))
-            throw std::runtime_error("MLIR module verification failed");
+        
 
 
 
@@ -1122,6 +1121,9 @@ namespace tc
             module.print(llvm::outs());
             llvm::outs() << "\n";
         }
+
+        if (mlir::failed(mlir::verify(module)))
+            throw std::runtime_error("MLIR module verification failed");
 
 
 
