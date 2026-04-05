@@ -194,6 +194,7 @@ namespace tc
     {
         //TODO - to LLVM IR
 
+        // ./mlir-opt --one-shot-bufferize="bufferize-function-boundaries" --convert-linalg-to-loops --lower-affine --convert-scf-to-cf --convert-arith-to-llvm --convert-func-to-llvm --convert-to-llvm --expand-strided-metadata --finalize-memref-to-llvm --reconcile-unrealized-casts
         return std::string("not implemented");
     }
 
@@ -1303,11 +1304,478 @@ namespace tc
 
 
 
+
+
+
+    static int64_t computeConvOutputDim(int64_t inDim, int64_t kernelDim, int64_t padBegin, int64_t padEnd, int64_t stride, int64_t dilation)
+    {
+        if (inDim == mlir::ShapedType::kDynamic)
+            return mlir::ShapedType::kDynamic;
+
+        int64_t effectiveKernel = dilation * (kernelDim - 1) + 1;
+        return (inDim + padBegin + padEnd - effectiveKernel) / stride + 1;
+    }
+
+
+    static mlir::Value computeConvOutputDimValue(mlir::OpBuilder& builder,
+                                                mlir::Location loc,
+                                                mlir::Value inDim,
+                                                int64_t kernelDim,
+                                                int64_t padBegin,
+                                                int64_t padEnd,
+                                                int64_t stride,
+                                                int64_t dilation)
+    {
+        int64_t effectiveKernel = dilation * (kernelDim - 1) + 1;
+        int64_t totalPad = padBegin + padEnd;
+
+        // out = (in + totalPad - effectiveKernel) / stride + 1
+        auto cstPad = mlir::arith::ConstantIndexOp::create(builder, loc, totalPad - effectiveKernel);
+        auto cstStride = mlir::arith::ConstantIndexOp::create(builder, loc, stride);
+        auto cstOne = mlir::arith::ConstantIndexOp::create(builder, loc, 1);
+
+        auto sum = mlir::arith::AddIOp::create(builder, loc, inDim, cstPad);
+        auto divide = mlir::arith::DivUIOp::create(builder, loc, sum, cstStride);
+        auto result = mlir::arith::AddIOp::create(builder, loc, divide, cstOne);
+
+        return result.getResult();
+    }
+
+    // padding in SAME mode
+    static void computeSamePad(int64_t inDim,
+                                int64_t kernelDim,
+                                int64_t stride,
+                                int64_t dilation,
+                                bool    sameUpper,
+                                int64_t& padBegin,
+                                int64_t& padEnd)
+    {
+        if (inDim == mlir::ShapedType::kDynamic)
+        {
+            // for dynamic inputs padding cant be calculated
+            padBegin = padEnd = 0;
+            return;
+        }
+
+        int64_t outDim          = (inDim + stride - 1) / stride;
+        int64_t effectiveKernel = dilation * (kernelDim - 1) + 1;
+        int64_t padTotal        = std::max(int64_t(0), (outDim - 1) * stride + effectiveKernel - inDim);
+
+        if (sameUpper)
+        {
+            padBegin = padTotal / 2;
+            padEnd = padTotal - padBegin;
+        }
+
+        else // SAME_LOWER
+        {
+            padEnd = padTotal / 2;
+            padBegin = padTotal - padEnd;
+        }
+    }
+
+
+
+    mlir::Value buildConv2dOp(mlir::OpBuilder& builder,
+                                mlir::Location loc,
+                                mlir::Value input,
+                                mlir::Value weights,
+                                std::optional<mlir::Value> bias,
+                                llvm::ArrayRef<int64_t> kernelShape,
+                                llvm::ArrayRef<int64_t> strides,
+                                llvm::ArrayRef<int64_t> pads,
+                                llvm::ArrayRef<int64_t> dilations,
+                                int64_t group,
+                                llvm::StringRef autoPad,
+                                mlir::MLIRContext* ctx)
+    {
+        auto inputType   = mlir::cast<mlir::RankedTensorType>(input.getType());
+        auto weightsType = mlir::cast<mlir::RankedTensorType>(weights.getType());
+        auto elemType    = inputType.getElementType();
+
+        if (inputType.getRank() != 4)
+            throw std::runtime_error("Conv2d: input must be 4D [N, C, H, W]");
+
+        if (weightsType.getRank() != 4)
+            throw std::runtime_error("Conv2d: weights must be 4D [M, C/G, kH, kW]");
+
+        int64_t N   = inputType.getDimSize(0);
+        int64_t C   = inputType.getDimSize(1);
+        int64_t H   = inputType.getDimSize(2);
+        int64_t W   = inputType.getDimSize(3);
+
+        int64_t M   = weightsType.getDimSize(0); // outputs
+        int64_t CpG = weightsType.getDimSize(1); // channels / group
+        int64_t kH  = weightsType.getDimSize(2);
+        int64_t kW  = weightsType.getDimSize(3);
+
+
+
+        if (kH == mlir::ShapedType::kDynamic && kernelShape.size() > 0)
+            kH = kernelShape[0];
+
+        if (kW == mlir::ShapedType::kDynamic && kernelShape.size() > 1)
+            kW = kernelShape[1];
+
+        if (C != mlir::ShapedType::kDynamic && CpG != mlir::ShapedType::kDynamic && C != CpG * group)
+        {
+            throw std::runtime_error("Conv2d: channel mismatch: C != C_per_group * group");
+        }
+
+
+        if (M != mlir::ShapedType::kDynamic && M % group != 0)
+            throw std::runtime_error("Conv2d: output channels must be divisible by group");
+
+        int64_t G = group;
+        int64_t F = (M != mlir::ShapedType::kDynamic)
+                        ? M / G
+                        : mlir::ShapedType::kDynamic;
+
+        int64_t sH = (strides.size()   > 0) ? strides[0]   : 1;
+        int64_t sW = (strides.size()   > 1) ? strides[1]   : 1;
+        int64_t dH = (dilations.size() > 0) ? dilations[0] : 1;
+        int64_t dW = (dilations.size() > 1) ? dilations[1] : 1;
+
+
+
+
+
+
+
+
+
+
+        // padding
+        int64_t padHBegin = 0, padHEnd = 0;
+        int64_t padWBegin = 0, padWEnd = 0;
+
+        if (autoPad == "NOTSET" || autoPad.empty())
+        {
+            if (pads.size() >= 4)
+            {
+                padHBegin = pads[0];
+                padWBegin = pads[1];
+                padHEnd   = pads[2];
+                padWEnd   = pads[3];
+            }
+        }
+
+        else if (autoPad == "VALID")
+        {
+            padHBegin = padHEnd = padWBegin = padWEnd = 0;
+        }
+
+        else if (autoPad == "SAME_UPPER" || autoPad == "SAME_LOWER")
+        {
+            bool upper = (autoPad == "SAME_UPPER");
+            computeSamePad(H, kH, sH, dH, upper, padHBegin, padHEnd);
+            computeSamePad(W, kW, sW, dW, upper, padWBegin, padWEnd);
+        }
+
+        else
+        {
+            throw std::runtime_error("Conv2d: unknown auto_pad value: " + autoPad.str());
+        }
+
+
+
+
+
+
+        // padding input
+        mlir::Value paddedInput = input;
+        int64_t     paddedH     = H;
+        int64_t     paddedW     = W;
+
+        if (padHBegin > 0 || padHEnd > 0 || padWBegin > 0 || padWEnd > 0)
+        {
+            paddedH = (H != mlir::ShapedType::kDynamic)
+                        ? H + padHBegin + padHEnd
+                        : mlir::ShapedType::kDynamic;
+
+            paddedW = (W != mlir::ShapedType::kDynamic)
+                        ? W + padWBegin + padWEnd
+                        : mlir::ShapedType::kDynamic;
+
+            auto paddedType = mlir::RankedTensorType::get({N, C, paddedH, paddedW}, elemType);
+
+            llvm::SmallVector<int64_t> lowPads  = {0, 0, padHBegin, padWBegin};
+            llvm::SmallVector<int64_t> highPads = {0, 0, padHEnd,   padWEnd};
+
+            auto lowAttr  = mlir::DenseI64ArrayAttr::get(ctx, lowPads);
+            auto highAttr = mlir::DenseI64ArrayAttr::get(ctx, highPads);
+
+
+            auto padOp = mlir::tensor::PadOp::create(
+                builder,
+                loc,
+                paddedType,
+                input,
+                mlir::ValueRange{}, // low
+                mlir::ValueRange{}, // high
+                lowAttr,
+                highAttr,
+                false);
+
+            mlir::OpBuilder::InsertionGuard guard(builder);
+            auto* block = builder.createBlock(&padOp.getRegion());
+
+            for (unsigned i = 0; i < 4; ++i) block->addArgument(builder.getIndexType(), loc);
+
+            builder.setInsertionPointToStart(block);
+
+            mlir::Value zero = makeZeroConstant(builder, loc, elemType);
+            mlir::tensor::YieldOp::create(builder, loc, zero);
+
+            paddedInput = padOp.getResult();
+        }
+
+
+
+
+
+
+
+        // reshaping input
+        auto reshapedInputType = mlir::RankedTensorType::get({N, G, CpG, paddedH, paddedW}, elemType);
+
+
+        //NOTE - maybe buildReshapeOp will suit here
+        auto buildReshapeShapeTensor = [&](mlir::RankedTensorType targetType, llvm::ArrayRef<mlir::Value> dynamicDims) -> mlir::Value
+        {
+            int64_t rank = targetType.getRank();
+            auto idxT = builder.getIndexType();
+            llvm::SmallVector<mlir::Value> elems;
+
+            unsigned dynIdx = 0;
+            for (int64_t i = 0; i < rank; ++i)
+            {
+                int64_t s = targetType.getDimSize(i);
+                if (s != mlir::ShapedType::kDynamic)
+                {
+                    elems.push_back(mlir::arith::ConstantIndexOp::create(builder, loc, s).getResult());
+                }
+
+                else
+                {
+                    if (dynIdx >= dynamicDims.size())
+                        throw std::runtime_error("buildReshapeShapeTensor: not enough dynamic dims");
+                    elems.push_back(dynamicDims[dynIdx++]);
+                }
+            }
+
+            auto shapeType = mlir::RankedTensorType::get({rank}, idxT);
+            auto fromElements = mlir::tensor::FromElementsOp::create(builder, loc, shapeType, elems);
+            
+            return fromElements.getResult();
+        };
+
+        llvm::SmallVector<mlir::Value> inputDynamicDims;
+        if (N == mlir::ShapedType::kDynamic)
+            inputDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, paddedInput, 0).getResult());
+
+        if (CpG == mlir::ShapedType::kDynamic)
+            inputDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, paddedInput, 1).getResult());
+
+        if (paddedH == mlir::ShapedType::kDynamic)
+            inputDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, paddedInput, 2).getResult());
+
+        if (paddedW == mlir::ShapedType::kDynamic)
+            inputDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, paddedInput, 3).getResult());
+
+
+        mlir::Value inputShapeTensor = buildReshapeShapeTensor(reshapedInputType, inputDynamicDims);
+
+        auto reshapeInputOp = mlir::tensor::ReshapeOp::create(builder, loc, reshapedInputType, paddedInput, inputShapeTensor);
+        mlir::Value reshapedInput = reshapeInputOp.getResult();
+
+
+
+
+
+
+
+
+
+        // transforming to fgchw format
+        auto weightsInterType = mlir::RankedTensorType::get({G, F, CpG, kH, kW}, elemType);
+
+        llvm::SmallVector<mlir::Value> interDynamicDims;
+
+        if (F == mlir::ShapedType::kDynamic)
+            interDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, weights, 0).getResult());
+
+        if (CpG == mlir::ShapedType::kDynamic)
+            interDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, weights, 1).getResult());
+
+        if (kH == mlir::ShapedType::kDynamic)
+            interDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, weights, 2).getResult());
+
+        if (kW == mlir::ShapedType::kDynamic)
+            interDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, weights, 3).getResult());
+
+
+        mlir::Value weightsInterShape = buildReshapeShapeTensor(weightsInterType, interDynamicDims);
+
+        auto reshapeInterOp = mlir::tensor::ReshapeOp::create(builder, loc, weightsInterType, weights, weightsInterShape);
+        mlir::Value weightsInter = reshapeInterOp.getResult();
+
+
+
+
+
+
+
+        // transpose [G, F, C/G, kH, kW] to [F, G, C/G, kH, kW]
+        auto weightsFinalType = mlir::RankedTensorType::get({F, G, CpG, kH, kW}, elemType);
+
+        llvm::SmallVector<mlir::Value> finalDynamicDims;
+
+        if (F == mlir::ShapedType::kDynamic)
+            finalDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, weightsInter, 1).getResult());
+
+        if (CpG == mlir::ShapedType::kDynamic)
+            finalDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, weightsInter, 2).getResult());
+
+        if (kH == mlir::ShapedType::kDynamic)
+            finalDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, weightsInter, 3).getResult());
+
+        if (kW == mlir::ShapedType::kDynamic)
+            finalDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, weightsInter, 4).getResult());
+
+
+        auto emptyTranspose = mlir::tensor::EmptyOp::create(builder, loc, weightsFinalType, finalDynamicDims);
+        llvm::SmallVector<int64_t> transposePerm = {1, 0, 2, 3, 4};
+
+        auto transposeOp = mlir::linalg::TransposeOp::create(builder, loc, weightsInter, emptyTranspose.getResult(), transposePerm);
+        mlir::Value reshapedWeights = transposeOp->getResult(0);
+
+
+
+
+
+
+        // [N, G, F, oH, oW]
+        int64_t oH = computeConvOutputDim(paddedH, kH, 0, 0, sH, dH);
+        int64_t oW = computeConvOutputDim(paddedW, kW, 0, 0, sW, dW);
+
+        auto convOutType = mlir::RankedTensorType::get({N, G, F, oH, oW}, elemType);
+
+        llvm::SmallVector<mlir::Value> convDynSizes;
+        if (N == mlir::ShapedType::kDynamic)
+            convDynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, reshapedInput, 0).getResult());
+
+        if (oH == mlir::ShapedType::kDynamic)
+        {
+            mlir::Value hDim = mlir::tensor::DimOp::create(builder, loc, reshapedInput, 3).getResult();
+            convDynSizes.push_back(computeConvOutputDimValue(builder, loc, hDim, kH, 0, 0, sH, dH));
+        }
+
+        if (oW == mlir::ShapedType::kDynamic)
+        {
+            mlir::Value wDim = mlir::tensor::DimOp::create(builder, loc, reshapedInput, 4).getResult();
+            convDynSizes.push_back(computeConvOutputDimValue(builder, loc, wDim, kW, 0, 0, sW, dW));
+        }
+
+        auto emptyOut = mlir::tensor::EmptyOp::create(builder, loc, convOutType, convDynSizes);
+        mlir::Value zero = makeZeroConstant(builder, loc, elemType);
+
+        auto fillOp = mlir::linalg::FillOp::create(builder, loc, mlir::ValueRange{zero}, mlir::ValueRange{emptyOut.getResult()});
+        mlir::Value initOut = fillOp->getResult(0);
+
+        auto stridesAttr   = mlir::DenseI64ArrayAttr::get(ctx, {sH, sW});
+        auto dilationsAttr = mlir::DenseI64ArrayAttr::get(ctx, {dH, dW});
+
+
+
+
+        auto convOp = mlir::linalg::Conv2DNgchwFgchwOp::create(
+            builder,
+            loc,
+            mlir::TypeRange{convOutType},
+            mlir::ValueRange{reshapedInput, reshapedWeights},
+            mlir::ValueRange{initOut},
+            stridesAttr,
+            dilationsAttr);
+
+        mlir::Value result = convOp->getResult(0);
+
+
+
+
+
+
+
+
+        // Reshape [N, G, F, oH, oW] to [N, M, oH, oW]
+        auto finalOutType = mlir::RankedTensorType::get({N, M, oH, oW}, elemType);
+
+        llvm::SmallVector<mlir::Value> finalDynamicDimsReshape;
+        if (N == mlir::ShapedType::kDynamic)
+            finalDynamicDimsReshape.push_back(mlir::tensor::DimOp::create(builder, loc, result, 0).getResult());
+
+
+        if (M == mlir::ShapedType::kDynamic)
+        {
+            mlir::Value gDim = mlir::tensor::DimOp::create(builder, loc, result, 1).getResult();
+            mlir::Value fDim = mlir::tensor::DimOp::create(builder, loc, result, 2).getResult();
+
+            finalDynamicDimsReshape.push_back(mlir::arith::MulIOp::create(builder, loc, gDim, fDim).getResult());
+        }
+
+        if (oH == mlir::ShapedType::kDynamic)
+            finalDynamicDimsReshape.push_back(mlir::tensor::DimOp::create(builder, loc, result, 3).getResult());
+
+        if (oW == mlir::ShapedType::kDynamic)
+            finalDynamicDimsReshape.push_back(mlir::tensor::DimOp::create(builder, loc, result, 4).getResult());
+
+
+
+
+
+        mlir::Value finalShapeTensor = buildReshapeShapeTensor(finalOutType, finalDynamicDimsReshape);
+        auto finalReshapeOp = mlir::tensor::ReshapeOp::create(builder, loc, finalOutType, result, finalShapeTensor);
+        result = finalReshapeOp.getResult();
+
+
+
+
+        // bias [M] broadcasts to [N, M, oH, oW]
+        if (bias.has_value())
+        {
+            mlir::Value biasVal = bias.value();
+            auto biasType = mlir::cast<mlir::RankedTensorType>(biasVal.getType());
+
+            if (biasType.getRank() != 1)
+                throw std::runtime_error("Conv2d: bias must be 1D");
+
+            auto biasReshapeType = mlir::RankedTensorType::get({1, M, 1, 1}, elemType);
+
+            llvm::SmallVector<mlir::Value> biasDynamicDims;
+            if (M == mlir::ShapedType::kDynamic)
+                biasDynamicDims.push_back(mlir::tensor::DimOp::create(builder, loc, biasVal, 0).getResult());
+
+            mlir::Value biasShapeTensor = buildReshapeShapeTensor(biasReshapeType, biasDynamicDims);
+
+            auto biasReshapeOp = mlir::tensor::ReshapeOp::create(builder, loc, biasReshapeType, biasVal, biasShapeTensor);
+            mlir::Value reshapedBias = biasReshapeOp.getResult();
+
+            result = buildElementwiseGeneric(OpType::Add, builder, loc, result, reshapedBias, ctx);
+        }
+
+        return result;
+    }
+
+
+
+
+
+
     
     void MLIRGen::processNode(mlir::OpBuilder& builder,
-                            const Node&      node,
-                            ValueMap&        vmap,
-                            const Graph&     graph) const
+                              const Node&      node,
+                              ValueMap&        vmap,
+                              const Graph&     graph) const
     {
         auto loc = builder.getUnknownLoc();
         auto nodeType = node.getOpType();
@@ -1526,7 +1994,58 @@ namespace tc
         // ── Conv2d ────────────────────────────────────────────────────────────────
         if (nodeType == OpType::Conv)
         {
-            //TODO - Conv
+            auto input = resolve(node.getInputs()[0]);
+            auto weights = resolve(node.getInputs()[1]);
+
+            std::optional<mlir::Value> bias = std::nullopt;
+            if (node.getInputs().size() >= 3 && !node.getInputs()[2].empty())
+                bias = resolve(node.getInputs()[2]);
+
+            std::vector<int64_t> kernelShape = {};
+            if (node.hasAttribute("kernel_shape"))
+                kernelShape = node.getAttribute("kernel_shape").asInts();
+
+            std::vector<int64_t> strides = {1, 1};
+            if (node.hasAttribute("strides"))
+                strides = node.getAttribute("strides").asInts();
+
+            std::vector<int64_t> pads = {0, 0, 0, 0};
+            if (node.hasAttribute("pads"))
+                pads = node.getAttribute("pads").asInts();
+
+            std::vector<int64_t> dilations = {1, 1};
+            if (node.hasAttribute("dilations"))
+                dilations = node.getAttribute("dilations").asInts();
+
+            int64_t group = 1;
+            if (node.hasAttribute("group"))
+                group = node.getAttribute("group").asInt();
+
+            llvm::StringRef autoPad = "NOTSET";
+            if (node.hasAttribute("auto_pad"))
+                autoPad = node.getAttribute("auto_pad").asString();
+
+
+
+
+
+
+            auto result = buildConv2dOp(builder, 
+                                        loc,
+                                        input,
+                                        weights,
+                                        bias,
+                                        kernelShape,
+                                        strides,
+                                        pads,
+                                        dilations,
+                                        group,
+                                        autoPad,
+                                        &ctx_);
+
+
+
+            vmap[node.getOutputs()[0]] = result;
             return;
         }
 
