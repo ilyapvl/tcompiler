@@ -115,6 +115,7 @@ add_library(tc_lib STATIC
     src/frontend/onnx_loader.cpp
     src/visualization/dot_exporter.cpp
     src/backend/mlir_gen.cpp
+    src/middle_end/mlir_builders.cpp
 )
 
 add_dependencies(tc_lib generate_onnx_proto)
