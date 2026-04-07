@@ -174,7 +174,7 @@ Returns the concatenated by `axis`. For example, `Concat(tensor1<2x3x4x4>, tenso
 
 
 ### Conv2d
-Returns 2d convolution of a tensor. Input and kernel must have `rank = 4`. Supports grouped convolution. For example, `Conv2d(input<1x8x32x32>, kernel<12x2x3x3>, group = 4) = tensor<1x12x30x30>
+Returns 2d convolution of a tensor. Input and kernel must have `rank = 4`. Supports grouped convolution. For example, `Conv2d(input<1x8x32x32>, kernel<12x2x3x3>, group = 4) = tensor<1x12x30x30>`
 
 
 
