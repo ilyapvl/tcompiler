@@ -74,8 +74,6 @@ Then, these files will be produced:
 ```
 
 - `<model.onnx>` – input ONNX model file.
-- `[output.dot]` – optional DOT file path (default: `graph.dot`)
-- `[output.png]` – optional PNG file path (GraphViz required)
 
 | Option | Description |
 |-|-|
