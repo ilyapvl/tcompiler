@@ -21,6 +21,9 @@ namespace tc
         Gemm,
         Conv,
         Relu,
+        Shape,
+        Reshape,
+        Concat,
         Other,
     };
 

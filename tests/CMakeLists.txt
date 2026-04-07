@@ -21,11 +21,20 @@ endif()
 
 add_executable(tc_tests
     test_main.cpp
-    test_tensor.cpp
-    test_attribute.cpp
-    test_node.cpp
-    test_graph.cpp
-    test_onnx_loader.cpp
+    frontend/test_tensor.cpp
+    frontend/test_attribute.cpp
+    frontend/test_node.cpp
+    frontend/test_graph.cpp
+    frontend/test_onnx_loader.cpp
+
+    middle_end/test_infer_broadcast_shape.cpp
+    middle_end/test_make_broadcast_map.cpp
+    middle_end/test_build_elementwise_generic.cpp
+    middle_end/test_build_relu_generic.cpp
+    middle_end/test_build_matmul_generic.cpp
+    middle_end/test_build_shape_op.cpp
+    middle_end/test_build_reshape_op.cpp
+    middle_end/test_build_concat_op.cpp
 )
 
 target_link_libraries(tc_tests

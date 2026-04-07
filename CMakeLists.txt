@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TensorCompiler VERSION 1.0.0 LANGUAGES CXX)
+project(TensorCompiler VERSION 1.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,11 +36,7 @@ if(NOT EXISTS "${ONNX_PROTO_FILE}")
     list(GET _dl_status 0 _dl_code)
     list(GET _dl_status 1 _dl_msg)
     if(NOT _dl_code EQUAL 0)
-        message(FATAL_ERROR
-            "Cannot download onnx.proto: ${_dl_msg}\n"
-            "Place the file manually:\n"
-            "  curl -L https://raw.githubusercontent.com/onnx/onnx/v1.16.0/onnx/onnx.proto3"
-            " -o ${ONNX_PROTO_FILE}")
+        message(FATAL_ERROR "Cannot download onnx.proto: ${_dl_msg}")
     endif()
     message(STATUS "onnx.proto downloaded to ${ONNX_PROTO_FILE}")
 endif()
@@ -70,6 +66,44 @@ add_custom_target(generate_onnx_proto DEPENDS "${ONNX_PB_H}" "${ONNX_PB_CC}")
 
 
 
+
+
+
+
+# MLIR / LLVM
+find_package(MLIR REQUIRED CONFIG)
+find_package(LLVM REQUIRED CONFIG)
+
+message(STATUS "MLIR version : ${MLIR_VERSION}")
+message(STATUS "LLVM version : ${LLVM_VERSION}")
+message(STATUS "MLIR dir     : ${MLIR_DIR}")
+message(STATUS "LLVM dir     : ${LLVM_DIR}")
+
+list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+
+include(TableGen)
+include(AddLLVM)
+include(AddMLIR)
+include(HandleLLVMOptions)
+
+# MLIR include dirs
+include_directories(SYSTEM
+    ${MLIR_INCLUDE_DIRS}
+    ${LLVM_INCLUDE_DIRS}
+)
+
+add_definitions(${LLVM_DEFINITIONS})
+
+
+
+
+
+
+set_source_files_properties("${ONNX_PB_CC}"
+    PROPERTIES COMPILE_FLAGS "-w"
+)
+
 # tc_lib
 
 add_library(tc_lib STATIC
@@ -80,6 +114,8 @@ add_library(tc_lib STATIC
     src/graph/graph.cpp
     src/frontend/onnx_loader.cpp
     src/visualization/dot_exporter.cpp
+    src/backend/mlir_gen.cpp
+    src/middle_end/mlir_builders.cpp
 )
 
 add_dependencies(tc_lib generate_onnx_proto)
@@ -88,21 +124,98 @@ target_include_directories(tc_lib PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${PROTO_GEN_DIR}"
     "${Protobuf_INCLUDE_DIRS}"
+    "${MLIR_INCLUDE_DIRS}"
+    "${LLVM_INCLUDE_DIRS}"
+)
+
+
+# dialects
+set(MLIR_DIALECT_LIBS
+    MLIRArithDialect
+    MLIRFuncDialect
+    MLIRLinalgDialect
+    MLIRMemRefDialect
+    MLIRSCFDialect
+    MLIRTensorDialect
+    MLIRAffineDialect
+    MLIRMathDialect
+    MLIRLLVMDialect
+    MLIRBufferizationDialect
+    MLIRBufferizationTransforms
+    MLIRLinalgTransforms
+)
+
+# passes
+set(MLIR_TRANSFORM_LIBS
+    MLIRPass
+    MLIRTransforms
+)
+
+# conversions
+set(MLIR_CONVERSION_LIBS
+    MLIRAffineToStandard
+    MLIRArithToLLVM
+    MLIRControlFlowToLLVM
+
+    MLIRFuncToLLVM
+
+    MLIRMathToLLVM
+    MLIRMemRefToLLVM
+    MLIRReconcileUnrealizedCasts
+    MLIRSCFToControlFlow
+
+)
+
+# MLIR translation
+set(MLIR_TARGET_LIBS
+    MLIRTargetLLVMIRExport
+    MLIRLLVMToLLVMIRTranslation
+    MLIRBuiltinToLLVMIRTranslation
+    MLIRRegisterAllPasses
+)
+
+# LLVM targets
+llvm_map_components_to_libnames(LLVM_TARGET_LIBS
+    AllTargetsAsmParsers
+    AllTargetsCodeGens
+    AllTargetsDescs
+    AllTargetsInfos
+    Analysis
+    CodeGen
+    Core
+    IPO
+    IRReader
+    MC
+    MCParser
+    Object
+    Passes
+    Support
+    Target
+    TransformUtils
 )
 
 target_link_libraries(tc_lib PUBLIC
+    # protobuf
     protobuf::libprotobuf
+    # abseil
     absl::log
     absl::log_internal_check_op
-
     absl::log_internal_voidify
     absl::base
     absl::strings
+    # MLIR
+    ${MLIR_DIALECT_LIBS}
+    ${MLIR_TRANSFORM_LIBS}
+    ${MLIR_CONVERSION_LIBS}
+    ${MLIR_TARGET_LIBS}
+    MLIRAnalysis
+    MLIRIR
+    MLIRParser
+    MLIRSupport
+    # LLVM
+    ${LLVM_TARGET_LIBS}
 )
 
-set_source_files_properties("${ONNX_PB_CC}"
-    PROPERTIES COMPILE_FLAGS "-w"
-)
 
 
 
