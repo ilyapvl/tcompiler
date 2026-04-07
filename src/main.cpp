@@ -15,7 +15,7 @@
 static void printUsage(const char* prog)
 {
     std::cout << "Usage: " << prog
-              << " <model.onnx> [graph.dot] [graph.png] [mlir-options...]\n\n";
+              << " <model.onnx> [mlir-options...]\n\n";
     tc::printMLIRHelp();
 }
 
@@ -77,27 +77,60 @@ int main(int argc, char* argv[])
         }
         */
 
-        std::cout << "\nMLIR code generation\n";
+        std::cout << "\nMLIR generation\n";
 
-        std::cout << "target triple : "
-                  << (mlir_opts.target_triple.empty()
-                      ? "(host)" : mlir_opts.target_triple) << "\n";
+        //std::cout << "target triple : "
+        //          << (mlir_opts.target_triple.empty()
+        //              ? "(host)" : mlir_opts.target_triple) << "\n";
 
-        std::cout << "cpu          : "
-                  << (mlir_opts.cpu.empty()
-                      ? "(host)" : mlir_opts.cpu) << "\n";
+        //std::cout << "cpu          : "
+        //          << (mlir_opts.cpu.empty()
+        //              ? "(host)" : mlir_opts.cpu) << "\n";
 
-        std::cout << "features      : "
-                  << (mlir_opts.features.empty()
-                      ? "(none)" : mlir_opts.features) << "\n";
+        //std::cout << "features      : "
+        //          << (mlir_opts.features.empty()
+        //              ? "(none)" : mlir_opts.features) << "\n";
 
-        std::cout << "optimized      : "
-                  << (mlir_opts.optimize ? "yes" : "no") << "\n\n";
+        //std::cout << "optimized      : "
+        //          << (mlir_opts.optimize ? "yes" : "no") << "\n\n";
 
         mlir::MLIRContext ctx;
         tc::MLIRGen gen(ctx);
 
         auto mlir_module = gen.generate(*graph, mlir_opts);
+
+
+
+        std::string mlir_out_filename;
+        bool mlir_out_provided = false;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (std::string(argv[i]) == "--mlir-out" && i + 1 < argc)
+            {
+                mlir_out_filename = argv[++i];
+                mlir_out_provided = true;
+            }
+        }
+
+
+
+        if (mlir_out_provided)
+        {
+            std::error_code errorCode;
+            llvm::raw_fd_ostream outputFile(mlir_out_filename, errorCode);
+            if (errorCode)
+            {
+                std::cerr <<  "Error opening " << mlir_out_filename << ' ' << errorCode.message() << "\n";
+                return 1;
+            }
+
+            mlir_module->print(outputFile);
+            outputFile.flush();
+            std::cout << "MLIR saved in " << mlir_out_filename << "\n";
+        }
+
+
+
 
         std::cout << "\ndone\n";
     }

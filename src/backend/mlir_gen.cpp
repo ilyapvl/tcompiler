@@ -245,21 +245,7 @@ namespace tc
         };
 
 
-        // creates a tensor which has shape same as source
-        auto createEmpyWithShapeLike = [&](mlir::Value source) -> mlir::Value
-        {
-            auto type = mlir::cast<mlir::RankedTensorType>(source.getType());
-            llvm::SmallVector<mlir::Value> dynSizes;
-            for (unsigned i = 0; i < type.getRank(); ++i)
-            {
-                if (type.isDynamicDim(i))
-                {
-                    auto dimVal = mlir::tensor::DimOp::create(builder, loc, source, i);
-                    dynSizes.push_back(dimVal);
-                }
-            }
-            return mlir::tensor::EmptyOp::create(builder, loc, type, dynSizes);
-        };
+        
 
 
 
@@ -564,7 +550,7 @@ namespace tc
 
         if (opts.print_mlir)
         {
-            llvm::outs() << "\nMLIR before optimization\n";
+            llvm::outs() << "\nMLIR representation:\n";
             module.print(llvm::outs());
             llvm::outs() << "\n";
         }
@@ -599,9 +585,7 @@ namespace tc
                 R"(
                 MLIR / LLVM codegen options:
                 --print-mlir            Print MLIR before optimization
-                --print-mlir-opt        Print MLIR after optimization
-                --no-optimize           Disable MLIR optimization passes
-
+                
                 --mlir-out=<path>       Write MLIR to file
     )";
     }
