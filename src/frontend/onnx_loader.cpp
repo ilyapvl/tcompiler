@@ -50,6 +50,54 @@ namespace tc
                 reinterpret_cast<const uint8_t*>(rd.data()) + rd.size());
         }
 
+
+        size_t elem_count = 1;
+        for (auto d : tp.dims()) elem_count *= d;
+
+        size_t elem_size = 0;
+    
+        switch (tp.data_type())
+        {
+            case onnx::TensorProto::FLOAT:
+            {
+                elem_size = sizeof(float);
+                data.resize(elem_count * elem_size);
+                float* ptr = reinterpret_cast<float*>(data.data());
+
+                for (int i = 0; i < tp.float_data_size(); ++i)
+                    ptr[i] = tp.float_data(i);
+
+                break;
+            }
+
+            case onnx::TensorProto::INT32:
+            {
+                elem_size = sizeof(int32_t);
+                data.resize(elem_count * elem_size);
+                int32_t* ptr = reinterpret_cast<int32_t*>(data.data());
+
+                for (int i = 0; i < tp.int32_data_size(); ++i)
+                    ptr[i] = tp.int32_data(i);
+
+                break;
+            }
+            
+            case onnx::TensorProto::INT64:
+            {
+                elem_size = sizeof(int64_t);
+                data.resize(elem_count * elem_size);
+                int64_t* ptr = reinterpret_cast<int64_t*>(data.data());
+
+                for (int i = 0; i < tp.int64_data_size(); ++i)
+                    ptr[i] = tp.int64_data(i);
+
+                break;
+            }
+
+            default:
+                break;
+        }
+
         return data;
     }
 
