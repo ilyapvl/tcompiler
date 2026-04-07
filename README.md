@@ -151,7 +151,7 @@ Performs matrix multiplication. If tensors have rank > 2, the leading dimensions
 
 
 ### Gemm
-General matrix multiplication. Computes `Y = alpha * A * B + beta * C` with transpositions of matrix dimensions possible. Built on `Add`, `Mul` and `MatMul`.
+General matrix multiplication. Computes `Y = alpha * A * B + beta * C` with transpositions of matrices possible. Built on `Add`, `Mul` and `MatMul`.
 
 
 
