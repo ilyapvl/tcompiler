@@ -90,7 +90,7 @@ INSTANTIATE_TEST_SUITE_P(
     ElementwiseCompatibleTest,
     testing::Combine(
         testing::Values(OpType::Add, OpType::Mul),
-        testing::ValuesIn(compatiblePairs())
+        testing::ValuesIn(AddMulTests)
     )
 );
 
@@ -120,5 +120,5 @@ TEST_P(ElementwiseIncompatibleTest, Throws)
 INSTANTIATE_TEST_SUITE_P(
     AddMulIncompatible,
     ElementwiseIncompatibleTest,
-    testing::ValuesIn(incompatiblePairs())
+    testing::ValuesIn(AddMulErrorTests)
 );

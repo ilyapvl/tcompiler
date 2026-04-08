@@ -36,53 +36,50 @@ namespace tc::test
     };
 
 
-    inline const std::vector<CompatiblePair>& compatiblePairs()
-    {
-        static const std::vector<CompatiblePair> pairs = {
-            // { shape1 }, { shape2 }, { result }
-            {{2, 3}, {2, 3}, {2, 3}},
-            {{},     {},     {}},
 
-            {{1, 3}, {2, 3}, {2, 3}},
-            {{2, 1}, {2, 3}, {2, 3}},
-            {{1, 3}, {2, 1}, {2, 3}},
-            {{3},    {2, 3}, {2, 3}},
-            {{2, 3}, {},     {2, 3}},
-            {{1, 1, 4}, {2, 3, 1}, {2, 3, 4}},
-            {{2, 1, 4}, {1, 3, 1}, {2, 3, 4}},
+    static const std::vector<CompatiblePair> AddMulTests = {
+        // { shape1 }, { shape2 }, { result }
+        {{2, 3}, {2, 3}, {2, 3}},
+        {{},     {},     {}},
 
-
-            {{N, 3}, {N, 3}, {N, 3}},
-            {{2, N}, {2, N}, {2, N}},
-            {{N},    {N},    {N}},
-
-            {{N, 3}, {2, 3}, {N, 3}},
-            {{2, N}, {2, 3}, {2, N}},
-            {{N, 3}, {1, 3}, {N, 3}},
+        {{1, 3}, {2, 3}, {2, 3}},
+        {{2, 1}, {2, 3}, {2, 3}},
+        {{1, 3}, {2, 1}, {2, 3}},
+        {{3},    {2, 3}, {2, 3}},
+        {{2, 3}, {},     {2, 3}},
+        {{1, 1, 4}, {2, 3, 1}, {2, 3, 4}},
+        {{2, 1, 4}, {1, 3, 1}, {2, 3, 4}},
 
 
-            {{}, {N, 3}, {N, 3}},
-            {{N, 3}, {}, {N, 3}},
-            
-            
-            {
-                {N, 1},
-                {2, N},
-                {N, N}
-            },
+        {{N, 3}, {N, 3}, {N, 3}},
+        {{2, N}, {2, N}, {2, N}},
+        {{N},    {N},    {N}},
+
+        {{N, 3}, {2, 3}, {N, 3}},
+        {{2, N}, {2, 3}, {2, N}},
+        {{N, 3}, {1, 3}, {N, 3}},
+
+
+        {{}, {N, 3}, {N, 3}},
+        {{N, 3}, {}, {N, 3}},
+        
+        
+        {
+            {N, 1},
+            {2, N},
+            {N, N}
+        },
 
 
 
-            {
-                {N, 2, N, 1},
-                {1, 2, 3},
-                {N, 2, N, 3}
-            },
-        };
+        {
+            {N, 2, N, 1},
+            {1, 2, 3},
+            {N, 2, N, 3}
+        },
+    };
 
 
-        return pairs;
-    }
 
 
 
@@ -96,18 +93,14 @@ namespace tc::test
         std::vector<int64_t> rhs;
     };
 
-    inline const std::vector<IncompatiblePair>& incompatiblePairs()
-    {
-        static const std::vector<IncompatiblePair> pairs = {
 
-            {{2, 3}, {4, 5}},
-            {{3},    {2, 4}},
-            {{2, 3}, {1, 4}}
+    static const std::vector<IncompatiblePair> AddMulErrorTests = {
 
-        };
+        {{2, 3}, {4, 5}},
+        {{3},    {2, 4}},
+        {{2, 3}, {1, 4}}
 
-        return pairs;
-    }
+    };
 
 
 
