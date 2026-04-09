@@ -6,6 +6,8 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
+#include "mlir/Parser/Parser.h"
+#include "llvm/IR/Module.h"
 
 #include <filesystem>
 #include <string>
@@ -15,7 +17,7 @@ namespace tc
 {
 
 
-    struct MLIRGenOptions
+    struct CodeGenOptions
     {
         bool print_mlir      = false; 
         bool print_mlir_opt  = false;
@@ -28,8 +30,8 @@ namespace tc
         bool emit_obj        = false;
 
 
-        std::string target_triple = "";
-        std::string cpu           = "";
+        std::string target_triple = "arm64_bare_metal";
+        std::string cpu           = "generic";
         std::string features      = "";
 
 
@@ -40,18 +42,19 @@ namespace tc
     };
 
 
-    MLIRGenOptions parseMLIROptions(int argc, char* argv[]);
+    CodeGenOptions parseMLIROptions(int argc, char* argv[]);
 
     void printMLIRHelp();
 
 
-    class MLIRGen
+    class CodeGen
     {
     public:
-        explicit MLIRGen(mlir::MLIRContext& ctx);
+        CodeGen(mlir::MLIRContext& mlir_ctx, llvm::LLVMContext& llvm_ctx);
 
 
-        [[nodiscard]] mlir::OwningOpRef<mlir::ModuleOp> generate(const Graph& graph, const MLIRGenOptions& opts = {});
+        int generate(const Graph& graph, const CodeGenOptions& opts = {},
+                        const std::string& mlir_out = "", const std::string& asm_out = "");
 
 
         
@@ -59,13 +62,11 @@ namespace tc
 
 
 
-        static std::string toLLVMIR(mlir::ModuleOp mod, const MLIRGenOptions& opts);
-
-
-        static void emitCode(mlir::ModuleOp mod, const MLIRGenOptions& opts);
+        
 
     private:
-        mlir::MLIRContext& ctx_;
+        mlir::MLIRContext& mlir_ctx_;
+        llvm::LLVMContext& llvm_ctx_;
 
         using ValueMap = std::unordered_map<std::string, mlir::Value>;
 
@@ -82,9 +83,15 @@ namespace tc
 
         [[nodiscard]] mlir::Value makeWeightConstant(mlir::OpBuilder& builder, mlir::Location loc, const Tensor& weight) const;
         
-
+        
+        void lowerToLLVM(mlir::ModuleOp mod);
         static void runOptPipeline(mlir::ModuleOp mod);
-        static void runLoweringPipeline(mlir::ModuleOp mod);
+        std::unique_ptr<llvm::Module> translateToLLVMIR(mlir::ModuleOp mod, llvm::raw_ostream &os);
+
+        mlir::OwningOpRef<mlir::ModuleOp> runLoweringPipeline(mlir::ModuleOp mod);
+
+        void emitAssembly(llvm::Module *llvmModule, const std::string &filename, const CodeGenOptions& opts);
+        
     };
 
 } // namespace tc

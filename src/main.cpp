@@ -15,18 +15,14 @@
 static void printUsage(const char* prog)
 {
     std::cout << "Usage: " << prog
-              << " <model.onnx> [mlir-options...]\n\n";
+              << " <model.onnx> [codegen-options...]\n\n";
     tc::printMLIRHelp();
 }
 
 int main(int argc, char* argv[])
 {
     llvm::InitLLVM init_llvm(argc, argv);
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllTargetMCs();
-    llvm::InitializeAllAsmParsers();
-    llvm::InitializeAllAsmPrinters();
+    
 
     if (argc < 2)
     {
@@ -39,9 +35,8 @@ int main(int argc, char* argv[])
 
     const std::filesystem::path onnx_path = argv[1];
     const std::filesystem::path dot_path  = "graph.dot";
-    //const std::filesystem::path png_path  = (argc >= 4) ? argv[3] : "";
 
-    tc::MLIRGenOptions mlir_opts = tc::parseMLIROptions(argc, argv);
+    tc::CodeGenOptions mlir_opts = tc::parseMLIROptions(argc, argv);
 
     try
     {
@@ -69,70 +64,49 @@ int main(int argc, char* argv[])
         tc::DotExporter exporter;
         exporter.exportToFile(*graph, dot_path);
         std::cout << "DOT file written: " << dot_path << "\n";
-        /*
-        if (!png_path.empty())
-        {
-            exporter.exportToPng(*graph, png_path);
-            std::cout << "PNG file written: " << png_path << "\n";
-        }
-        */
+
+
+
+
+
+
 
         std::cout << "\nMLIR generation\n";
 
-        //std::cout << "target triple : "
-        //          << (mlir_opts.target_triple.empty()
-        //              ? "(host)" : mlir_opts.target_triple) << "\n";
+        
+        mlir::MLIRContext mlir_ctx;
+        llvm::LLVMContext llvm_ctx;
 
-        //std::cout << "cpu          : "
-        //          << (mlir_opts.cpu.empty()
-        //              ? "(host)" : mlir_opts.cpu) << "\n";
-
-        //std::cout << "features      : "
-        //          << (mlir_opts.features.empty()
-        //              ? "(none)" : mlir_opts.features) << "\n";
-
-        //std::cout << "optimized      : "
-        //          << (mlir_opts.optimize ? "yes" : "no") << "\n\n";
-
-        mlir::MLIRContext ctx;
-        tc::MLIRGen gen(ctx);
-
-        auto mlir_module = gen.generate(*graph, mlir_opts);
+        std::string mlir_out = "";
 
 
-
-        std::string mlir_out_filename;
-        bool mlir_out_provided = false;
         for (int i = 1; i < argc; ++i)
         {
             if (std::string(argv[i]) == "--mlir-out" && i + 1 < argc)
             {
-                mlir_out_filename = argv[++i];
-                mlir_out_provided = true;
+                mlir_out = argv[++i];
             }
         }
 
 
+        std::string asm_out = "";
 
-        if (mlir_out_provided)
+        for (int i = 1; i < argc; ++i)
         {
-            std::error_code errorCode;
-            llvm::raw_fd_ostream outputFile(mlir_out_filename, errorCode);
-            if (errorCode)
+            if (std::string(argv[i]) == "-o" && i + 1 < argc)
             {
-                std::cerr <<  "Error opening " << mlir_out_filename << ' ' << errorCode.message() << "\n";
-                return 1;
+                asm_out = argv[++i];
             }
-
-            mlir_module->print(outputFile);
-            outputFile.flush();
-            std::cout << "MLIR saved in " << mlir_out_filename << "\n";
         }
 
 
+        tc::CodeGen gen(mlir_ctx, llvm_ctx);
+        gen.generate(*graph, mlir_opts, mlir_out, asm_out);
 
 
-        std::cout << "\ndone\n";
+        
+
+
     }
     
     catch (const std::exception& e)

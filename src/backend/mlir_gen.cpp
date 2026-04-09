@@ -37,6 +37,17 @@
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMPass.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/Passes.h"
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
+#include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
+
+ 
+
+
+
 
 // ── buffering ───────────────────────────────────────────────────────────────────
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
@@ -45,10 +56,12 @@
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/raw_ostream.h"
 
 // ── LLVM ───────────────────────────────────────────────────────────────────
 #include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/Module.h"
+
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/TargetSelect.h"
@@ -57,6 +70,11 @@
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
+#include "llvm/CodeGen/Passes.h"
+
+
+
+
 
 #include <fstream>
 #include <iostream>
@@ -101,17 +119,28 @@ namespace tc
         }
     }
 
-    MLIRGen::MLIRGen(mlir::MLIRContext& ctx) : ctx_(ctx)
+    CodeGen::CodeGen(mlir::MLIRContext& mlir_ctx, llvm::LLVMContext& llvm_ctx) : mlir_ctx_(mlir_ctx), llvm_ctx_(llvm_ctx)
     {
-        registerAllDialects(ctx_);
-        mlir::registerBuiltinDialectTranslation(ctx_);
-        mlir::registerLLVMDialectTranslation(ctx_);
+        registerAllDialects(mlir_ctx_);
+        mlir::registerBuiltinDialectTranslation(mlir_ctx_);
+        mlir::registerLLVMDialectTranslation(mlir_ctx_);
+
+        llvm::InitializeAllTargetInfos();
+        llvm::InitializeAllTargets();
+        llvm::InitializeAllTargetMCs();
+        llvm::InitializeAllAsmParsers();
+        llvm::InitializeAllAsmPrinters();
+
+        LLVMInitializeAArch64Target();
+        LLVMInitializeAArch64TargetInfo();
+        LLVMInitializeAArch64TargetMC();
+        LLVMInitializeAArch64AsmPrinter();
     }
 
     //ranked tensor from data
-    mlir::RankedTensorType MLIRGen::makeTensorType(DataType dt, const TensorShape& shape) const
+    mlir::RankedTensorType CodeGen::makeTensorType(DataType dt, const TensorShape& shape) const
     {
-        auto elem = mlirElemType(dt, &ctx_);
+        auto elem = mlirElemType(dt, &mlir_ctx_);
         llvm::SmallVector<int64_t> dims;
         dims.reserve(shape.dims.size());
 
@@ -121,12 +150,12 @@ namespace tc
         return mlir::RankedTensorType::get(dims, elem);
     }
 
-    mlir::RankedTensorType MLIRGen::tensorTypeOf(const Tensor& t) const
+    mlir::RankedTensorType CodeGen::tensorTypeOf(const Tensor& t) const
     {
         return makeTensorType(t.getDtype(), t.getShape());
     }
 
-    mlir::Value MLIRGen::makeWeightConstant(mlir::OpBuilder& builder,
+    mlir::Value CodeGen::makeWeightConstant(mlir::OpBuilder& builder,
                                             mlir::Location   loc,
                                             const Tensor&    w) const
     {
@@ -157,55 +186,106 @@ namespace tc
         return mlir::arith::ConstantOp::create(builder, loc, rtt, attr);
     }
 
-    void MLIRGen::runOptPipeline(mlir::ModuleOp mod)
+    void CodeGen::runOptPipeline(mlir::ModuleOp mod)
     {
         //TODO - optimize
         return;
     }
 
-    void MLIRGen::runLoweringPipeline(mlir::ModuleOp mod)
+
+    mlir::OwningOpRef<mlir::ModuleOp> CodeGen::runLoweringPipeline(mlir::ModuleOp mod)
     {
-        //FIXME - cannot bufferize
-        return;
+        //FIXME - bufferization using external mlir-opt call
+        std::string tempInput   = std::filesystem::temp_directory_path() / "temp_input.mlir";
+        std::string tempOutput  = std::filesystem::temp_directory_path() / "temp_output.mlir";
 
-        mlir::PassManager pm(mod->getContext());
+        {
+            std::error_code ec;
+            llvm::raw_fd_ostream os(tempInput, ec);
 
-        mlir::bufferization::OneShotBufferizePassOptions opts;
-        opts.bufferizeFunctionBoundaries = true;
-        opts.allowUnknownOps = true;
-        pm.addPass(mlir::bufferization::createOneShotBufferizePass(opts));
+            if (ec)
+            {
+                llvm::errs() << "Failed to create temp file: " << ec.message() << "\n";
+                return nullptr;
+            }
 
-        pm.addPass(mlir::createCanonicalizerPass());
+            mod->print(os);
+        }
 
-        pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertLinalgToLoopsPass());
-        pm.addPass(mlir::createLowerAffinePass());
-        pm.addPass(mlir::createSCFToControlFlowPass());
-        pm.addPass(mlir::createArithToLLVMConversionPass());
-        pm.addPass(mlir::createConvertFuncToLLVMPass());
+        std::string cmd = std::string(MLIR_OPT_PATH) +
+            " --one-shot-bufferize=\"bufferize-function-boundaries=1\"" +
+            " " + tempInput + " -o " + tempOutput;
 
-        pm.addPass(mlir::createConvertToLLVMPass());
+        int ret = std::system(cmd.c_str());
+        if (ret != 0)
+        {
+            llvm::errs() << "mlir-opt failed with code " << ret << "\n";
+            return nullptr;
+        }
 
-        pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+        mlir::MLIRContext *ctx = mod->getContext();
 
-        if (mlir::failed(pm.run(mod)))
-            throw std::runtime_error("MLIR lowering failed");
+        auto newMod = mlir::parseSourceFile<mlir::ModuleOp>(tempOutput, ctx);
+        if (!newMod)
+        {
+            llvm::errs() << "Failed to parse bufferized module\n";
+            return nullptr;
+        }
+
+        std::filesystem::remove(tempInput);
+        std::filesystem::remove(tempOutput);
+
+        return newMod;
     }
 
-    std::string MLIRGen::toLLVMIR(mlir::ModuleOp mod, const MLIRGenOptions& opts)
+    
+    std::unique_ptr<llvm::Module> CodeGen::translateToLLVMIR(mlir::ModuleOp mod, llvm::raw_ostream &os)
     {
-        //TODO - to LLVM IR
+        auto llvmModule = mlir::translateModuleToLLVMIR(mod, llvm_ctx_);
+        if (!llvmModule)
+        {
+            throw std::runtime_error("Failed to translate MLIR module to LLVM IR");
+        }
 
-        // ./mlir-opt --one-shot-bufferize="bufferize-function-boundaries" --convert-linalg-to-loops --lower-affine --convert-scf-to-cf --convert-arith-to-llvm --convert-func-to-llvm --convert-to-llvm --expand-strided-metadata --finalize-memref-to-llvm --reconcile-unrealized-casts
-        return std::string("not implemented");
+        return llvmModule;
     }
 
-    void MLIRGen::emitCode(mlir::ModuleOp mod, const MLIRGenOptions& opts)
+    void CodeGen::emitAssembly(llvm::Module *llvmModule, const std::string &filename, const CodeGenOptions& opts)
     {
-        if (!opts.emit_asm && !opts.emit_obj) return;
+        if (!llvmModule) throw std::runtime_error("Null module");
 
-        //TODO - to asm code
+        llvm::Triple targetTriple(opts.target_triple);
+        std::string error;
+        const llvm::Target *target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
 
-        return;
+        if (!target) throw std::runtime_error("Target lookup failed: " + error);
+
+        llvm::TargetOptions opt;
+        opt.FloatABIType = llvm::FloatABI::Soft;
+
+        std::unique_ptr<llvm::TargetMachine> TM(target->createTargetMachine(
+            targetTriple, opts.cpu, opts.features, opt,
+            llvm::Reloc::PIC_, llvm::CodeModel::Small, llvm::CodeGenOptLevel::None
+        ));
+
+        llvmModule->setDataLayout(TM->createDataLayout());
+        llvmModule->setTargetTriple(targetTriple);
+
+        std::error_code ec;
+        llvm::raw_fd_ostream dest(filename, ec, llvm::sys::fs::OF_None);
+        if (ec) throw std::runtime_error("Cannot open file: " + ec.message());
+
+
+        {
+            llvm::legacy::PassManager pm;
+            if (TM->addPassesToEmitFile(pm, dest, nullptr, llvm::CodeGenFileType::AssemblyFile))
+                throw std::runtime_error("Cannot emit assembly");
+
+            pm.run(*llvmModule);
+        }
+
+
+        dest.flush();
     }
 
 
@@ -215,7 +295,7 @@ namespace tc
 
 
     
-    void MLIRGen::processNode(mlir::OpBuilder& builder,
+    void CodeGen::processNode(mlir::OpBuilder& builder,
                               const Node&      node,
                               ValueMap&        vmap,
                               const Graph&     graph) const
@@ -262,7 +342,7 @@ namespace tc
             //always use generic build //TODO - straight generation when same shapes
 
 
-            auto result = buildElementwiseGeneric(nodeType, builder, loc, lhs, rhs, &ctx_);
+            auto result = buildElementwiseGeneric(nodeType, builder, loc, lhs, rhs, &mlir_ctx_);
             vmap[node.getOutputs()[0]] = result;
         
             return;
@@ -282,7 +362,7 @@ namespace tc
             auto B = resolve(node.getInputs()[1]);
 
             //TODO - if 2D or 3D use linalg.batch_matmul
-            auto result = buildMatmulGeneric(builder, loc, A, B, false, false, &ctx_);
+            auto result = buildMatmulGeneric(builder, loc, A, B, false, false, &mlir_ctx_);
             vmap[node.getOutputs()[0]] = result;
             return;
         }
@@ -310,7 +390,7 @@ namespace tc
             if (node.hasAttribute("transB"))    transB  = node.getAttribute("transB").asInt() != 0;
 
             // A[] * B[]
-            mlir::Value result = buildMatmulGeneric(builder, loc, A, B, transA, transB, &ctx_);
+            mlir::Value result = buildMatmulGeneric(builder, loc, A, B, transA, transB, &mlir_ctx_);
             auto resultType = llvm::cast<mlir::RankedTensorType>(result.getType());
 
             // dynamic dimensions
@@ -325,7 +405,7 @@ namespace tc
 
 
             auto alphaTensor = createConstantTensor(builder, loc, resultType, dynSizes, alpha);
-            result = buildElementwiseGeneric(OpType::Mul, builder, loc, result, alphaTensor, &ctx_);
+            result = buildElementwiseGeneric(OpType::Mul, builder, loc, result, alphaTensor, &mlir_ctx_);
             
 
             // + С * beta
@@ -335,11 +415,11 @@ namespace tc
 
                 // scaling C
                 auto betaTensor = createConstantTensor(builder, loc, resultType, dynSizes, beta);
-                Cval = buildElementwiseGeneric(OpType::Mul, builder, loc, Cval, betaTensor, &ctx_);
+                Cval = buildElementwiseGeneric(OpType::Mul, builder, loc, Cval, betaTensor, &mlir_ctx_);
                 
 
                 // result + C
-                result = buildElementwiseGeneric(OpType::Add, builder, loc, result, Cval, &ctx_);
+                result = buildElementwiseGeneric(OpType::Add, builder, loc, result, Cval, &mlir_ctx_);
             }
 
             vmap[node.getOutputs()[0]] = result;
@@ -351,7 +431,7 @@ namespace tc
         if (nodeType == OpType::Relu)
         {
             auto input = resolve(node.getInputs()[0]);
-            auto result = buildReLUGeneric(builder, loc, input, &ctx_);
+            auto result = buildReLUGeneric(builder, loc, input, &mlir_ctx_);
             vmap[node.getOutputs()[0]] = result;
 
             return;
@@ -466,7 +546,7 @@ namespace tc
                                         dilations,
                                         group,
                                         autoPad,
-                                        &ctx_);
+                                        &mlir_ctx_);
 
 
 
@@ -485,12 +565,54 @@ namespace tc
 
 
 
-    mlir::OwningOpRef<mlir::ModuleOp> MLIRGen::generate(const Graph& graph, const MLIRGenOptions& opts)
-    {
-        auto module = mlir::ModuleOp::create(
-            mlir::UnknownLoc::get(&ctx_), graph.getName());
+    
 
-        mlir::OpBuilder builder(&ctx_);
+    void CodeGen::lowerToLLVM(mlir::ModuleOp mod)
+    {
+        mlir::PassManager pm(mod->getContext());
+
+        pm.addPass(mlir::createConvertLinalgToLoopsPass());
+        pm.addPass(mlir::createLowerAffinePass());
+
+        pm.addPass(mlir::createSCFToControlFlowPass());
+
+
+        pm.addPass(mlir::createArithToLLVMConversionPass());
+        pm.addPass(mlir::createConvertFuncToLLVMPass());
+
+
+
+        pm.addPass(mlir::memref::createExpandStridedMetadataPass());
+
+        pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+
+        pm.addPass(mlir::createCanonicalizerPass());
+        pm.addPass(mlir::createCSEPass());
+
+
+        pm.addPass(mlir::createConvertIndexToLLVMPass());
+
+
+        pm.addPass(mlir::createConvertControlFlowToLLVMPass());
+        pm.addPass(mlir::createConvertToLLVMPass());  
+        pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+
+        if (mlir::failed(pm.run(mod)))
+        {
+            mod->dump();
+            throw std::runtime_error("Lowering to LLVM dialect failed");
+        }
+
+        std::cout << "Successfully lowered to LLVM dialect\n";
+    }
+
+
+    int CodeGen::generate(const Graph& graph, const CodeGenOptions& opts,
+                            const std::string& mlir_out, const std::string& asm_out)
+    {
+        auto module = mlir::ModuleOp::create(mlir::UnknownLoc::get(&mlir_ctx_), graph.getName());
+
+        mlir::OpBuilder builder(&mlir_ctx_);
         builder.setInsertionPointToEnd(module.getBody());
 
         llvm::SmallVector<mlir::Type> arg_types;
@@ -512,8 +634,8 @@ namespace tc
         }
 
         auto func_type = builder.getFunctionType(arg_types, ret_types);
-        auto func = mlir::func::FuncOp::create(
-            builder.getUnknownLoc(), graph.getName(), func_type);
+        auto func = mlir::func::FuncOp::create(builder.getUnknownLoc(), graph.getName(), func_type);
+
         module.push_back(func);
         func.addEntryBlock();
 
@@ -548,6 +670,7 @@ namespace tc
 
 
 
+
         if (opts.print_mlir)
         {
             llvm::outs() << "\nMLIR representation:\n";
@@ -555,10 +678,23 @@ namespace tc
             llvm::outs() << "\n";
         }
 
+        if (!mlir_out.empty())
+        {
+            std::error_code ec;
+            llvm::raw_fd_ostream os(mlir_out, ec);
+            if (ec)
+            {
+                throw std::runtime_error("Cannot open MLIR output file: " + ec.message());
+            }
+            module->print(os);
+            os.flush();
+        }
+
         if (mlir::failed(mlir::verify(module)))
             throw std::runtime_error("MLIR module verification failed");
 
 
+        auto bufferized = runLoweringPipeline(module);
 
         if (!opts.mlir_out.empty())
         {
@@ -567,13 +703,16 @@ namespace tc
             if (!ec) module.print(ofs);
         }
 
+        lowerToLLVM(*bufferized);
 
+        auto llvmModule = translateToLLVMIR(*bufferized, llvm::outs());
+        
+        if (opts.optimize) runOptPipeline(module);
 
-        if (opts.optimize)
-            runOptPipeline(module);
-
-
-        return module;
+        std::string asm_out_final = (asm_out == "") ? "out.s" : asm_out;
+        emitAssembly(llvmModule.get(), asm_out_final, opts);
+        std::cout << "Asm code for " << opts.target_triple << " generated successfully" << std::endl;
+        return 0;
     }
 
 
@@ -610,9 +749,9 @@ namespace tc
 
 
 
-    MLIRGenOptions parseMLIROptions(int argc, char* argv[])
+    CodeGenOptions parseMLIROptions(int argc, char* argv[])
     {
-        MLIRGenOptions opts;
+        CodeGenOptions opts;
 
         auto startsWith = [](const std::string& s, const std::string& prefix)
         {

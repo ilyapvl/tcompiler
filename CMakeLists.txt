@@ -88,7 +88,7 @@ include(AddMLIR)
 include(HandleLLVMOptions)
 
 # MLIR include dirs
-include_directories(SYSTEM
+include_directories(
     ${MLIR_INCLUDE_DIRS}
     ${LLVM_INCLUDE_DIRS}
 )
@@ -163,7 +163,6 @@ set(MLIR_CONVERSION_LIBS
     MLIRMemRefToLLVM
     MLIRReconcileUnrealizedCasts
     MLIRSCFToControlFlow
-
 )
 
 # MLIR translation
@@ -172,6 +171,8 @@ set(MLIR_TARGET_LIBS
     MLIRLLVMToLLVMIRTranslation
     MLIRBuiltinToLLVMIRTranslation
     MLIRRegisterAllPasses
+    MLIRLinalgToStandard
+    
 )
 
 # LLVM targets
@@ -217,6 +218,22 @@ target_link_libraries(tc_lib PUBLIC
 )
 
 
+
+
+
+
+find_program(MLIR_OPT_EXECUTABLE
+    NAMES mlir-opt
+    HINTS ${MLIR_TOOLS_BINARY_DIR} ${LLVM_TOOLS_BINARY_DIR}
+)
+
+if(NOT MLIR_OPT_EXECUTABLE)
+    message(WARNING "mlir-opt not found. Runtime bufferization via external tool will be disabled.")
+else()
+    message(STATUS "Found mlir-opt: ${MLIR_OPT_EXECUTABLE}")
+
+    target_compile_definitions(tc_lib PUBLIC MLIR_OPT_PATH="${MLIR_OPT_EXECUTABLE}")
+endif()
 
 
 # exec
