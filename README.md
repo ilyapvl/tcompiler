@@ -1,6 +1,6 @@
 # TCompiler
 
-A project of tensor compiler that loads ONNX models and transforms them into MLIR IR
+A project of tensor compiler that handles ONNX models and transforms them into assembly code
 
 ## Features
 
@@ -12,7 +12,8 @@ A project of tensor compiler that loads ONNX models and transforms them into MLI
 - Topological sorting of graph nodes (Kahn’s algorithm)
 - Export to GraphViz DOT format
 - Generating a MLIR representation of the loaded model, saving it to a file
-- Testing using GoogleTest.
+- Lowering all MLIR dialects to llvm dialect, converting to LLVM IR and generating asm code for different architectures
+- Testing using GoogleTest
 
 ## Dependencies
 
@@ -75,15 +76,18 @@ Then, these files will be produced:
 
 - `<model.onnx>` – input ONNX model file.
 
-| Option | Description |
-|-|-|
-| --print-mlir | Print MLIR before optimisation |
-| --mlir-out <path> | Write MLIR module to file |
+### Options
+- `--print-mlir` — Print MLIR before optimisation
+- `--mlir-out <path>` — Write MLIR module to file
+- `--target-triple=<llvm_triple>` — Target triple for asm generating. Default is arm64-bare-metal
+- `--cpu=<cpu>` — CPU type for asm generating. Default is generic
+- `--features=<features>` — Features for asm generating. Default is none
+- `-o <filename>` — Filename of the final asm file. Default is "out.s"
 
 ### Example
 
 ```
-./tcompiler ../models/test_ops.onnx --print-mlir --mlir-out output.mlir
+./tcompiler ../models/test_model.onnx --print-mlir --mlir-out output.mlir --target-triple="x86_64-pc-linux" -o main.s
 ```
 
 File `graph.dot` with a DOT representation of a graph will be created.
@@ -114,7 +118,9 @@ Example of graph visualizing:
 │   ├── frontend/
 │   │   └── onnx_loader.hpp
 │   ├── middle_end/
-│   │   └── mlir_gen.hpp
+│   │   └── mlir_builders.hpp
+│   ├── backend/
+│   │   └── codegen.hpp
 │   └── visualization/
 │       └── dot_exporter.hpp
 ├── src/
@@ -125,15 +131,15 @@ Example of graph visualizing:
 │   │   └── tensor.cpp
 │   ├── frontend/
 │   │   └── onnx_loader.cpp
-│   ├── visualization/
-│   │   └── dot_exporter.cpp
 │   ├── middle_end/
 │   │   └── mlir_builders.cpp
 │   ├── backend/
-│   │   └── mlir_gen.cpp
+│   │   └── codegen.cpp
+│   ├── visualization/
+│   │   └── dot_exporter.cpp
 │   └── main.cpp
 ├── tests/
-│   ├── ...
+│   └── ...
 └── README.md
 ```
 
@@ -175,6 +181,8 @@ Returns the concatenated by `axis`. For example, `Concat(tensor1<2x3x4x4>, tenso
 Returns 2d convolution of a tensor. Input and kernel must have `rank = 4`. Supports grouped convolution. For example, `Conv2d(input<1x8x32x32>, kernel<12x2x3x3>, group = 4) = tensor<1x12x30x30>`
 
 
+## Code generation
+Currently there are problems with bufferizing MLIR IR from C++ code, so `--one-shot-bufferize` pass is performed by an external call to `mlir-opt` (found automatically by CMake). All other lowering passes are done in `runLoweringPipeline()` internally. Current llvm optimization level is None, optimizing passes will be implemented
 
 ## Testing
 
@@ -195,4 +203,3 @@ Or run the test executable directly:
 
 - External data (weights stored in separate files) are not yet supported. Only single-file models
 - Reshape sometimes fail to handle shape tensors with `-1` when applied to an input with dynamic dimension. That is not usually an issue because most widely used batch tensors with shape `<?x...const...>` are processed correctly. Things like `<?x?x...>` will most likely fail.
-- MLIR to LLVM and further translation via pass manager is not implemented. Use mlir-opt, mlir-translate.
