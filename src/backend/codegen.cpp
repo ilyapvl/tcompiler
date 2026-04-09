@@ -1,4 +1,4 @@
-#include "backend/mlir_gen.hpp"
+#include "backend/codegen.hpp"
 #include "middle_end/mlir_builders.hpp"
 
 // ── MLIR ───────────────────────────────────────────────────────────────────

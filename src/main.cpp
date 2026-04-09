@@ -1,6 +1,6 @@
 #include "frontend/onnx_loader.hpp"
 #include "visualization/dot_exporter.hpp"
-#include "backend/mlir_gen.hpp"
+#include "backend/codegen.hpp"
 
 #include "mlir/IR/MLIRContext.h"
 

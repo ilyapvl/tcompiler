@@ -114,7 +114,7 @@ add_library(tc_lib STATIC
     src/graph/graph.cpp
     src/frontend/onnx_loader.cpp
     src/visualization/dot_exporter.cpp
-    src/backend/mlir_gen.cpp
+    src/backend/codegen.cpp
     src/middle_end/mlir_builders.cpp
 )
 
