@@ -12,7 +12,7 @@ A project of tensor compiler that creates an executable file from a model in ONN
 - Topological sorting of graph nodes (Kahn’s algorithm)
 - Export to GraphViz DOT format
 - Generating a MLIR representation of the loaded model, saving it to a file
-- Lowering all MLIR dialects to llvm dialect, converting to LLVM IR and generating asm code for different architectures
+- Lowering all MLIR dialects to llvm dialect, converting to LLVM IR and generating obj files for different architectures
 - Testing using GoogleTest
 
 ## Dependencies
@@ -79,7 +79,7 @@ Then, these files will be produced:
 ### Options
 - `--print-mlir` — Print MLIR before optimisation
 - `--mlir-out <path>` — Write MLIR module to file
-- `--target-triple=<llvm_triple>` — Target triple for asm generating. Default is arm64-bare-metal
+- `--target-triple=<llvm_triple>` — Target triple for obj generating. Default is arm64-bare-metal
 - `--cpu=<cpu>` — CPU type for obj generating. Default is generic
 - `--features=<features>` — Features for obj generating. Default is none
 - `-o <filename>` — Filename of the final obj file. Default is "out.s"
@@ -138,8 +138,11 @@ Example of graph visualizing:
 │   ├── visualization/
 │   │   └── dot_exporter.cpp
 │   └── main.cpp
+├── models/
+│   └── test_model.onnx
 ├── tests/
 │   └── ...
+├── driver.cpp
 └── README.md
 ```
 
