@@ -1,6 +1,6 @@
 # TCompiler
 
-A project of tensor compiler that handles ONNX models and transforms them into assembly code
+A project of tensor compiler that creates an executable file from a model in ONNX formax
 
 ## Features
 
@@ -80,14 +80,14 @@ Then, these files will be produced:
 - `--print-mlir` — Print MLIR before optimisation
 - `--mlir-out <path>` — Write MLIR module to file
 - `--target-triple=<llvm_triple>` — Target triple for asm generating. Default is arm64-bare-metal
-- `--cpu=<cpu>` — CPU type for asm generating. Default is generic
-- `--features=<features>` — Features for asm generating. Default is none
-- `-o <filename>` — Filename of the final asm file. Default is "out.s"
+- `--cpu=<cpu>` — CPU type for obj generating. Default is generic
+- `--features=<features>` — Features for obj generating. Default is none
+- `-o <filename>` — Filename of the final obj file. Default is "out.s"
 
 ### Example
 
 ```
-./tcompiler ../models/test_model.onnx --print-mlir --mlir-out output.mlir --target-triple="x86_64-pc-linux" -o main.s
+./tcompiler ../models/test_model.onnx --print-mlir --mlir-out output.mlir --target-triple="x86_64-pc-linux" -o model.o
 ```
 
 File `graph.dot` with a DOT representation of a graph will be created.
@@ -184,6 +184,17 @@ Returns 2d convolution of a tensor. Input and kernel must have `rank = 4`. Suppo
 ## Code generation
 Currently there are problems with bufferizing MLIR IR from C++ code, so `--one-shot-bufferize` pass is performed by an external call to `mlir-opt` (found automatically by CMake). All other lowering passes are done in `runLoweringPipeline()` internally. Current llvm optimization level is None, optimizing passes will be implemented
 
+## Running
+To run a compiled program, you need to link its obj file with libmlir_c_runner_utils library. Also you need a driver - an external program that is responsible for transmitting and recieving data. Loading data from external files is also left to driver. Driver's realization should not depend on a platform; however, `driver.cpp` file given here was only tested on Apple arm64 with arm64-apple-darwin target triple. To build the final executable, run those commands:
+
+- `./tcompiler ../models/test_model.onnx --target-triple="arm64-apple-darwin" -o model.o`
+- `clang++ -c <driver_path> -o driver.o`
+- `clang++ <driver_obj_path> model.o -L${MLIR_LIBRARY_PATH} -lmlir_c_runner_utils -o main_model`
+- `./main_model`
+
+
+This driver runs a simple `test_model.onnx` (see `test.py` to see how the model was built) and checks the result
+
 ## Testing
 
 Run all tests:
@@ -201,5 +212,4 @@ Or run the test executable directly:
 
 ## Limitations
 
-- External data (weights stored in separate files) are not yet supported. Only single-file models
 - Reshape sometimes fail to handle shape tensors with `-1` when applied to an input with dynamic dimension. That is not usually an issue because most widely used batch tensors with shape `<?x...const...>` are processed correctly. Things like `<?x?x...>` will most likely fail.
