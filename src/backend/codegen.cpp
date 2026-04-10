@@ -213,7 +213,7 @@ namespace tc
         }
 
         std::string cmd = std::string(MLIR_OPT_PATH) +
-            " --one-shot-bufferize=\"bufferize-function-boundaries=1\"" +
+            " --one-shot-bufferize=\"bufferize-function-boundaries=true allow-return-allocs-from-loops=true\"" +
             " " + tempInput + " -o " + tempOutput;
 
         int ret = std::system(cmd.c_str());
@@ -250,7 +250,7 @@ namespace tc
         return llvmModule;
     }
 
-    void CodeGen::emitAssembly(llvm::Module *llvmModule, const std::string &filename, const CodeGenOptions& opts)
+    void CodeGen::emitObject(llvm::Module *llvmModule, const std::string &filename, const CodeGenOptions& opts)
     {
         if (!llvmModule) throw std::runtime_error("Null module");
 
@@ -278,7 +278,7 @@ namespace tc
 
         {
             llvm::legacy::PassManager pm;
-            if (TM->addPassesToEmitFile(pm, dest, nullptr, llvm::CodeGenFileType::AssemblyFile))
+            if (TM->addPassesToEmitFile(pm, dest, nullptr, llvm::CodeGenFileType::ObjectFile))
                 throw std::runtime_error("Cannot emit assembly");
 
             pm.run(*llvmModule);
@@ -571,6 +571,11 @@ namespace tc
     {
         mlir::PassManager pm(mod->getContext());
 
+        mod.walk([](mlir::func::FuncOp funcOp)
+        {
+            funcOp->setAttr("llvm.emit_c_interface", mlir::UnitAttr::get(funcOp.getContext()));
+        });
+
         pm.addPass(mlir::createConvertLinalgToLoopsPass());
         pm.addPass(mlir::createLowerAffinePass());
 
@@ -710,7 +715,7 @@ namespace tc
         if (opts.optimize) runOptPipeline(module);
 
         std::string asm_out_final = (asm_out == "") ? "out.s" : asm_out;
-        emitAssembly(llvmModule.get(), asm_out_final, opts);
+        emitObject(llvmModule.get(), asm_out_final, opts);
         std::cout << "Asm code for " << opts.target_triple << " generated successfully" << std::endl;
         return 0;
     }

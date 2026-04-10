@@ -90,7 +90,7 @@ namespace tc
 
         mlir::OwningOpRef<mlir::ModuleOp> runLoweringPipeline(mlir::ModuleOp mod);
 
-        void emitAssembly(llvm::Module *llvmModule, const std::string &filename, const CodeGenOptions& opts);
+        void emitObject(llvm::Module *llvmModule, const std::string &filename, const CodeGenOptions& opts);
         
     };
 
