@@ -191,8 +191,8 @@ Currently there are problems with bufferizing MLIR IR from C++ code, so `--one-s
 To run a compiled program, you need to link its obj file with libmlir_c_runner_utils library. Also you need a driver - an external program that is responsible for transmitting and recieving data. Loading data from external files is also left to driver. Driver's realization should not depend on a platform; however, `driver.cpp` file given here was only tested on Apple arm64 with arm64-apple-darwin target triple. To build the final executable, run those commands:
 
 - `./tcompiler ../models/test_model.onnx --target-triple="arm64-apple-darwin" -o model.o`
-- `clang++ -c <driver_path> -o driver.o`
-- `clang++ <driver_obj_path> model.o -L${MLIR_LIBRARY_PATH} -lmlir_c_runner_utils -o main_model`
+- `clang++ -c ../driver.cpp -o driver.o`
+- `clang++ driver.o model.o -L${MLIR_LIBRARY_PATH} -lmlir_c_runner_utils -o main_model`
 - `./main_model`
 
 
