@@ -49,43 +49,14 @@ TEST_P(ReLUParamTest, ReLU)
 
 
 
-    Value result = buildReLUGeneric(builder, loc, input, &ctx);
+    Value result = buildReLU(builder, loc, input, &ctx);
     ASSERT_TRUE(result);
 
 
-    auto generic = result.getDefiningOp<linalg::GenericOp>();
-    ASSERT_TRUE(generic);
-    EXPECT_EQ(generic.getNumDpsInputs(), 1);
-    EXPECT_EQ(generic.getNumDpsInits(), 1);
-
-
-
-
-    auto& region = generic.getRegion();
-    ASSERT_FALSE(region.empty());
-
-
-
-    auto& block = region.front();
-    auto yield = dyn_cast<linalg::YieldOp>(block.getTerminator());
-    ASSERT_TRUE(yield);
-
-
-
-    auto maxOp = yield.getOperand(0).getDefiningOp<arith::MaximumFOp>();
-    ASSERT_TRUE(maxOp);
-    EXPECT_EQ(maxOp.getLhs(), block.getArgument(0));
-
-
-
-
-    auto zeroConst = maxOp.getRhs().getDefiningOp<arith::ConstantOp>();
-    ASSERT_TRUE(zeroConst);
-
-
-
-    auto zeroAttr = mlir::cast<FloatAttr>(zeroConst.getValue());
-    EXPECT_FLOAT_EQ(zeroAttr.getValueAsDouble(), 0.0);
+    auto maxOp = result.getDefiningOp<linalg::MaxOp>();
+    ASSERT_TRUE(maxOp) << "Expected linalg.max operation";
+    EXPECT_EQ(maxOp.getNumDpsInputs(), 2);
+    EXPECT_EQ(maxOp.getNumDpsInits(), 1);
 
 
 
