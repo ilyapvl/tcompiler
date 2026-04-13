@@ -52,32 +52,53 @@ TEST_P(ElementwiseCompatibleTest, AddMul)
     Value lhs = func.getArgument(0);
     Value rhs = func.getArgument(1);
 
-    Value result = buildElementwiseGeneric(op, builder, loc, lhs, rhs, &ctx);
+    Value result = buildElementwise(op, builder, loc, lhs, rhs, &ctx);
     ASSERT_TRUE(result);
 
-    auto generic = result.getDefiningOp<linalg::GenericOp>();
-    ASSERT_TRUE(generic);
-    EXPECT_EQ(generic.getNumDpsInputs(), 2);
-    EXPECT_EQ(generic.getNumDpsInits(), 1);
+    bool sameShape = (lhsType.getShape() == rhsType.getShape());
 
-
-    auto& region = generic.getRegion();
-    ASSERT_FALSE(region.empty());
-
-    auto& block = region.front();
-    auto yield = dyn_cast<linalg::YieldOp>(block.getTerminator());
-    ASSERT_TRUE(yield);
-
-    if (op == OpType::Add)
+    if (sameShape)
     {
-        auto addOp = yield.getOperand(0).getDefiningOp<arith::AddFOp>();
-        ASSERT_TRUE(addOp);
+        if (op == OpType::Add)
+        {
+            auto namedOp = result.getDefiningOp<linalg::AddOp>();
+            ASSERT_TRUE(namedOp) << "Expected linalg.add for same shapes";
+            EXPECT_EQ(namedOp.getNumDpsInputs(), 2);
+            EXPECT_EQ(namedOp.getNumDpsInits(), 1);
+        }
+
+        else if (op == OpType::Mul)
+        {
+            auto namedOp = result.getDefiningOp<linalg::MulOp>();
+            ASSERT_TRUE(namedOp) << "Expected linalg.mul for same shapes";
+            EXPECT_EQ(namedOp.getNumDpsInputs(), 2);
+            EXPECT_EQ(namedOp.getNumDpsInits(), 1);
+        }
     }
-    
-    else if (op == OpType::Mul)
+
+    else
     {
-        auto mulOp = yield.getOperand(0).getDefiningOp<arith::MulFOp>();
-        ASSERT_TRUE(mulOp);
+        auto generic = result.getDefiningOp<linalg::GenericOp>();
+        ASSERT_TRUE(generic) << "Expected linalg.generic for different shapes";
+        EXPECT_EQ(generic.getNumDpsInputs(), 2);
+        EXPECT_EQ(generic.getNumDpsInits(), 1);
+
+        auto& region = generic.getRegion();
+        ASSERT_FALSE(region.empty());
+        auto& block = region.front();
+        auto yield = dyn_cast<linalg::YieldOp>(block.getTerminator());
+        ASSERT_TRUE(yield);
+
+        if (op == OpType::Add)
+        {
+            auto addOp = yield.getOperand(0).getDefiningOp<arith::AddFOp>();
+            ASSERT_TRUE(addOp);
+        }
+        else if (op == OpType::Mul)
+        {
+            auto mulOp = yield.getOperand(0).getDefiningOp<arith::MulFOp>();
+            ASSERT_TRUE(mulOp);
+        }
     }
 
     func::ReturnOp::create(builder, loc, result);
@@ -114,7 +135,7 @@ TEST_P(ElementwiseIncompatibleTest, Throws)
     Value lhs = createConstantTensor(builder, loc, lhsType, {}, 1.0);
     Value rhs = createConstantTensor(builder, loc, rhsType, {}, 2.0);
 
-    EXPECT_THROW(buildElementwiseGeneric(OpType::Add, builder, loc, lhs, rhs, &ctx), std::runtime_error);
+    EXPECT_THROW(buildElementwise(OpType::Add, builder, loc, lhs, rhs, &ctx), std::runtime_error);
 }
 
 INSTANTIATE_TEST_SUITE_P(

@@ -47,16 +47,46 @@ TEST_P(MatMulTest, MatMul)
     Value A = func.getArgument(0);
     Value B = func.getArgument(1);
 
-    Value result = buildMatmulGeneric(builder, loc, A, B, param.transA, param.transB, &ctx);
+    Value result = buildMatMul(builder, loc, A, B, param.transA, param.transB, &ctx);
     ASSERT_TRUE(result);
 
-    
 
-    auto generic = result.getDefiningOp<linalg::GenericOp>();
-    ASSERT_TRUE(generic);
-    EXPECT_EQ(generic.getNumDpsInputs(), 2);
-    EXPECT_EQ(generic.getNumDpsInits(), 1);
-    EXPECT_EQ(result.getType(), outType);
+
+    bool noTranspose = !param.transA && !param.transB;
+    bool rank2 = (aType.getRank() == 2 && bType.getRank() == 2);
+    bool rank3 = (aType.getRank() == 3 && bType.getRank() == 3);
+    bool sameBatch = true;
+
+    if (rank3)
+    {
+        auto batchA = aType.getShape().drop_back(2);
+        auto batchB = bType.getShape().drop_back(2);
+        sameBatch = (batchA == batchB);
+    }
+
+    if (noTranspose && rank2)
+    {
+        auto namedOp = result.getDefiningOp<linalg::MatmulOp>();
+        ASSERT_TRUE(namedOp) << "Expected linalg.matmul for rank 2";
+        EXPECT_EQ(namedOp.getNumDpsInputs(), 2);
+        EXPECT_EQ(namedOp.getNumDpsInits(), 1);
+    }
+    
+    else if (noTranspose && rank3 && sameBatch)
+    {
+        auto namedOp = result.getDefiningOp<linalg::BatchMatmulOp>();
+        ASSERT_TRUE(namedOp) << "Expected linalg.batch_matmul for rank 3";
+        EXPECT_EQ(namedOp.getNumDpsInputs(), 2);
+        EXPECT_EQ(namedOp.getNumDpsInits(), 1);
+    }
+    
+    else
+    {
+        auto generic = result.getDefiningOp<linalg::GenericOp>();
+        ASSERT_TRUE(generic) << "Expected linalg.generic for other cases";
+        EXPECT_EQ(generic.getNumDpsInputs(), 2);
+        EXPECT_EQ(generic.getNumDpsInits(), 1);
+    }
 
 
 
