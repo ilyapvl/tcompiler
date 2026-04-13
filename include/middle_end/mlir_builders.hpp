@@ -34,7 +34,7 @@ namespace tc
         llvm::ArrayRef<llvm::ArrayRef<int64_t>> inputShapes,
         llvm::ArrayRef<int64_t> inputRanks);
 
-    mlir::Value buildElementwiseGeneric(
+    mlir::Value buildElementwise(
         OpType opType,
         mlir::OpBuilder& builder,
         mlir::Location loc,
@@ -42,7 +42,7 @@ namespace tc
         mlir::Value rhs,
         mlir::MLIRContext* ctx);
 
-    mlir::Value buildMatmulGeneric(mlir::OpBuilder& builder,
+    mlir::Value buildMatMul(mlir::OpBuilder& builder,
                                 mlir::Location loc,
                                 mlir::Value A,
                                 mlir::Value B,
@@ -50,7 +50,7 @@ namespace tc
                                 const bool transB,
                                 mlir::MLIRContext* ctx);
 
-    mlir::Value buildReLUGeneric(mlir::OpBuilder& builder, mlir::Location loc, mlir::Value input, mlir::MLIRContext* ctx);
+    mlir::Value buildReLU(mlir::OpBuilder& builder, mlir::Location loc, mlir::Value input, mlir::MLIRContext* ctx);
 
     mlir::Value buildShapeOp(mlir::OpBuilder& builder,
                             mlir::Location loc,

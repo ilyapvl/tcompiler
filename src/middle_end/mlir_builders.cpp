@@ -9,6 +9,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Utils/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -266,12 +267,41 @@ namespace tc
 
 
 
-    template<typename ArithOp>
+    mlir::Value buildNamedElementwise(OpType opType,
+                                  mlir::OpBuilder& builder,
+                                  mlir::Location loc,
+                                  mlir::Value lhs,
+                                  mlir::Value rhs,
+                                  mlir::RankedTensorType outType,
+                                  const llvm::SmallVector<mlir::Value>& dynSizes)
+    {
+        auto emptyOut = mlir::tensor::EmptyOp::create(builder, loc, outType, dynSizes);
+
+        switch (opType)
+        {
+            case OpType::Add:
+            {
+                auto op = mlir::linalg::AddOp::create(builder, loc, mlir::ValueRange{lhs, rhs}, mlir::ValueRange{emptyOut});
+                return op->getResult(0);
+            }
+
+            case OpType::Mul:
+            {
+                auto op = mlir::linalg::MulOp::create(builder, loc, mlir::ValueRange{lhs, rhs}, mlir::ValueRange{emptyOut});
+                return op->getResult(0);
+            }
+
+            default:
+                throw std::runtime_error("buildNamedElementwise: unsupported OpType");
+        }
+    }
+
+    template<typename Op>
     struct BodyEmitter
     {
         static void emit(mlir::OpBuilder& b, mlir::Location loc, mlir::Block* block)
         {
-            auto result = ArithOp::create(b, loc, block->getArgument(0), block->getArgument(1));
+            auto result = Op::create(b, loc, block->getArgument(0), block->getArgument(1));
             mlir::linalg::YieldOp::create(b, loc, mlir::ValueRange{result});
         }
     };
@@ -310,7 +340,7 @@ namespace tc
         }
     }
 
-    mlir::Value buildElementwiseGeneric(
+    mlir::Value buildElementwise(
         OpType opType,
         mlir::OpBuilder& builder,
         mlir::Location loc,
@@ -320,7 +350,8 @@ namespace tc
     {
 
         if (opType != OpType::Add && opType != OpType::Mul)
-            throw std::runtime_error("buildElementwiseGeneric only supports Add and Mul");
+            throw std::runtime_error("buildElementwise only supports Add and Mul");
+
 
         auto lhsType = mlir::cast<mlir::RankedTensorType>(lhs.getType());
         auto rhsType = mlir::cast<mlir::RankedTensorType>(rhs.getType());
@@ -335,6 +366,16 @@ namespace tc
                                                     {lhs, rhs},
                                                     {lhsType.getShape(), rhsType.getShape()},
                                                     {lhsType.getRank(), rhsType.getRank()});
+
+        if (lhsType.getShape().equals(rhsType.getShape()))
+            return buildNamedElementwise(opType, builder, loc, lhs, rhs, outType, dynSizes);
+
+
+        
+
+        
+
+
 
         auto emptyOut = mlir::tensor::EmptyOp::create(builder, loc, outType, dynSizes);
 
@@ -370,7 +411,7 @@ namespace tc
 
 
 
-    mlir::Value buildMatmulGeneric(
+    mlir::Value buildMatMul(
                                 mlir::OpBuilder& builder,
                                 mlir::Location loc,
                                 mlir::Value A,
@@ -404,6 +445,108 @@ namespace tc
         llvm::SmallVector<int64_t> batchA(rankA - 2), batchB(rankB - 2);
         for (unsigned i = 0; i < rankA - 2; ++i) batchA[i] = Atype.getDimSize(i);
         for (unsigned i = 0; i < rankB - 2; ++i) batchB[i] = Btype.getDimSize(i);
+
+
+        bool canUseNamedMatmul = !transA && !transB &&
+                             batchA.size() == batchB.size() &&
+                             std::equal(batchA.begin(), batchA.end(), batchB.begin()) &&
+                             K == K2;
+
+        if (canUseNamedMatmul)
+        {
+            if (rankA == 2 && rankB == 2)
+            {
+                auto outBatchShape = batchA;
+                unsigned outBatchRank = outBatchShape.size();
+
+                llvm::SmallVector<int64_t> outShape = outBatchShape;
+                outShape.push_back(M);
+                outShape.push_back(N);
+
+                auto outType = mlir::RankedTensorType::get(outShape, Atype.getElementType());
+
+
+                llvm::SmallVector<mlir::Value> dynOutSizes;
+                unsigned totalRank = outShape.size();
+                for (unsigned i = 0; i < totalRank; ++i)
+                {
+                    if (outShape[i] != mlir::ShapedType::kDynamic) continue;
+
+                    if (i < outBatchRank)
+                    {
+                        auto dim = mlir::tensor::DimOp::create(builder, loc, A, i);
+                        dynOutSizes.push_back(dim);
+                    }
+                    
+                    else if (i == totalRank - 2)
+                    {
+                        // M
+                        unsigned srcIdx = rankA - 2;
+                        auto dim = mlir::tensor::DimOp::create(builder, loc, A, srcIdx);
+                        dynOutSizes.push_back(dim);
+                    }
+                    
+                    else if (i == totalRank - 1)
+                    {
+                        // N
+                        unsigned srcIdx = rankB - 1;
+                        auto dim = mlir::tensor::DimOp::create(builder, loc, B, srcIdx);
+                        dynOutSizes.push_back(dim);
+                    }
+                }
+
+                auto initOut = createConstantTensor(builder, loc, outType, dynOutSizes, 0.0);
+
+                auto matmulOp = mlir::linalg::MatmulOp::create(builder, loc, mlir::ValueRange{A, B}, mlir::ValueRange{initOut});
+
+                return matmulOp->getResult(0);
+            }
+
+            else if (rankA == 3 && rankB == 3)
+            {
+                llvm::SmallVector<int64_t> outShape = batchA;
+                outShape.push_back(M);
+                outShape.push_back(N);
+                auto outType = mlir::RankedTensorType::get(outShape, Atype.getElementType());
+
+
+
+                llvm::SmallVector<mlir::Value> dynSizes;
+
+                // batch
+                for (unsigned i = 0; i < batchA.size(); ++i)
+                {
+                    if (outShape[i] == mlir::ShapedType::kDynamic)
+                    {
+                        dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, A, i));
+                    }
+                }
+
+                // M
+                if (M == mlir::ShapedType::kDynamic)
+                {
+                    unsigned srcIdx = rankA - 2;
+                    dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, A, srcIdx));
+                }
+
+                // N
+                if (N == mlir::ShapedType::kDynamic)
+                {
+                    unsigned srcIdx = rankB - 1;
+                    dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, B, srcIdx));
+                }
+
+                auto initOut = createConstantTensor(builder, loc, outType, dynSizes, 0.0);
+                auto batchMatmulOp = mlir::linalg::BatchMatmulOp::create(builder, loc, mlir::ValueRange{A, B}, mlir::ValueRange{initOut});
+                return batchMatmulOp->getResult(0);
+            }
+
+            
+        }
+
+
+
+
 
         // broadcasting
         auto outBatchShape = inferBroadcastShape(batchA, batchB);
@@ -612,69 +755,19 @@ namespace tc
     }
 
 
-    mlir::Value buildReLUGeneric(mlir::OpBuilder& builder, mlir::Location loc, mlir::Value input, mlir::MLIRContext* ctx)
+    mlir::Value buildReLU(mlir::OpBuilder& builder, mlir::Location loc, mlir::Value input, mlir::MLIRContext* ctx)
     {
-        auto inputType = llvm::cast<mlir::RankedTensorType>(input.getType());
-        auto elemType = inputType.getElementType();
-        unsigned rank = inputType.getRank();
-
-        auto outType = inputType;
+        auto outType = llvm::cast<mlir::RankedTensorType>(input.getType());
 
         // dynamic dimensions
-        llvm::SmallVector<mlir::Value> dynSizes;
-        for (unsigned i = 0; i < rank; ++i)
-        {
-            if (inputType.isDynamicDim(i))
-            {
-                dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, input, i));
-            }
-        }
+        llvm::SmallVector<mlir::Value> dynSizes = mlir::tensor::createDynamicDimValues(builder, loc, input);
 
         auto emptyOut = mlir::tensor::EmptyOp::create(builder, loc, outType, dynSizes);
+        auto zeroTensor = createConstantTensor(builder, loc, outType, dynSizes, 0.0);
 
-        // affine maps
-        auto identityMap = mlir::AffineMap::getMultiDimIdentityMap(rank, ctx);
-        llvm::SmallVector<mlir::utils::IteratorType> iterators(rank, mlir::utils::IteratorType::parallel);
+        auto maxOp = mlir::linalg::MaxOp::create(builder, loc, mlir::ValueRange{input, zeroTensor}, mlir::ValueRange{emptyOut});
 
-        auto generic = mlir::linalg::GenericOp::create(builder,
-                                                        loc,
-                                                        outType,
-                                                        mlir::ValueRange{input},
-                                                        mlir::ValueRange{emptyOut},
-                                                        {identityMap, identityMap},
-                                                        iterators);
-
-        
-        mlir::OpBuilder::InsertionGuard guard(builder);
-        
-        auto* block = builder.createBlock(&generic.getRegion());
-        block->addArgument(elemType, loc);
-        block->addArgument(elemType, loc);
-
-        builder.setInsertionPointToStart(block);
-
-        auto zero = makeZeroConstant(builder, loc, elemType);
-        mlir::Value result;
-
-        if (llvm::isa<mlir::FloatType>(elemType))
-        {
-            result = mlir::arith::MaximumFOp::create(builder, loc, block->getArgument(0), zero);
-        }
-        
-        else if (llvm::isa<mlir::IntegerType>(elemType))
-        {
-            result = mlir::arith::MaxSIOp::create(builder, loc, block->getArgument(0), zero);
-        }
-        
-        else
-        {
-            throw std::runtime_error("ReLU: unsupported element type");
-        }
-
-        mlir::linalg::YieldOp::create(builder, loc, mlir::ValueRange{result});
-        
-
-        return generic.getResult(0);
+        return maxOp.getResult(0);
     }
 
 
@@ -1578,7 +1671,7 @@ namespace tc
             auto biasReshapeOp = mlir::tensor::ReshapeOp::create(builder, loc, biasReshapeType, biasVal, biasShapeTensor);
             mlir::Value reshapedBias = biasReshapeOp.getResult();
 
-            result = buildElementwiseGeneric(OpType::Add, builder, loc, result, reshapedBias, ctx);
+            result = buildElementwise(OpType::Add, builder, loc, result, reshapedBias, ctx);
         }
 
         return result;

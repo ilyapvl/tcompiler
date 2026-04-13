@@ -82,7 +82,7 @@ Then, these files will be produced:
 - `--target-triple=<llvm_triple>` — Target triple for obj generating. Default is arm64-bare-metal
 - `--cpu=<cpu>` — CPU type for obj generating. Default is generic
 - `--features=<features>` — Features for obj generating. Default is none
-- `-o <filename>` — Filename of the final obj file. Default is "out.s"
+- `-o <filename>` — Filename of the final obj file. Default is "out.o"
 
 ### Example
 

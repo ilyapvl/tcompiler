@@ -342,7 +342,7 @@ namespace tc
             //always use generic build //TODO - straight generation when same shapes
 
 
-            auto result = buildElementwiseGeneric(nodeType, builder, loc, lhs, rhs, &mlir_ctx_);
+            auto result = buildElementwise(nodeType, builder, loc, lhs, rhs, &mlir_ctx_);
             vmap[node.getOutputs()[0]] = result;
         
             return;
@@ -362,7 +362,7 @@ namespace tc
             auto B = resolve(node.getInputs()[1]);
 
             //TODO - if 2D or 3D use linalg.batch_matmul
-            auto result = buildMatmulGeneric(builder, loc, A, B, false, false, &mlir_ctx_);
+            auto result = buildMatMul(builder, loc, A, B, false, false, &mlir_ctx_);
             vmap[node.getOutputs()[0]] = result;
             return;
         }
@@ -390,7 +390,7 @@ namespace tc
             if (node.hasAttribute("transB"))    transB  = node.getAttribute("transB").asInt() != 0;
 
             // A[] * B[]
-            mlir::Value result = buildMatmulGeneric(builder, loc, A, B, transA, transB, &mlir_ctx_);
+            mlir::Value result = buildMatMul(builder, loc, A, B, transA, transB, &mlir_ctx_);
             auto resultType = llvm::cast<mlir::RankedTensorType>(result.getType());
 
             // dynamic dimensions
@@ -405,7 +405,7 @@ namespace tc
 
 
             auto alphaTensor = createConstantTensor(builder, loc, resultType, dynSizes, alpha);
-            result = buildElementwiseGeneric(OpType::Mul, builder, loc, result, alphaTensor, &mlir_ctx_);
+            result = buildElementwise(OpType::Mul, builder, loc, result, alphaTensor, &mlir_ctx_);
             
 
             // + С * beta
@@ -415,11 +415,11 @@ namespace tc
 
                 // scaling C
                 auto betaTensor = createConstantTensor(builder, loc, resultType, dynSizes, beta);
-                Cval = buildElementwiseGeneric(OpType::Mul, builder, loc, Cval, betaTensor, &mlir_ctx_);
+                Cval = buildElementwise(OpType::Mul, builder, loc, Cval, betaTensor, &mlir_ctx_);
                 
 
                 // result + C
-                result = buildElementwiseGeneric(OpType::Add, builder, loc, result, Cval, &mlir_ctx_);
+                result = buildElementwise(OpType::Add, builder, loc, result, Cval, &mlir_ctx_);
             }
 
             vmap[node.getOutputs()[0]] = result;
@@ -431,7 +431,7 @@ namespace tc
         if (nodeType == OpType::Relu)
         {
             auto input = resolve(node.getInputs()[0]);
-            auto result = buildReLUGeneric(builder, loc, input, &mlir_ctx_);
+            auto result = buildReLU(builder, loc, input, &mlir_ctx_);
             vmap[node.getOutputs()[0]] = result;
 
             return;
@@ -714,7 +714,7 @@ namespace tc
         
         if (opts.optimize) runOptPipeline(module);
 
-        std::string asm_out_final = (asm_out == "") ? "out.s" : asm_out;
+        std::string asm_out_final = (asm_out == "") ? "out.o" : asm_out;
         emitObject(llvmModule.get(), asm_out_final, opts);
         std::cout << "Asm code for " << opts.target_triple << " generated successfully" << std::endl;
         return 0;

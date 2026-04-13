@@ -72,8 +72,8 @@ int main()
     };
 
     // biases from binary
-    float *bias1_data = loadBinaryF32("bias1.bin", outputTotal);
-    float *bias2_data = loadBinaryF32("bias2.bin", outputTotal);
+    float *bias1_data = loadBinaryF32("../bias1.bin", outputTotal);
+    float *bias2_data = loadBinaryF32("../bias2.bin", outputTotal);
 
     StridedMemRef<float, 3> B1 = {
         bias1_data, bias1_data, 0,
