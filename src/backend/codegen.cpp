@@ -714,7 +714,7 @@ namespace tc
         
         if (opts.optimize) runOptPipeline(module);
 
-        std::string asm_out_final = (asm_out == "") ? "out.s" : asm_out;
+        std::string asm_out_final = (asm_out == "") ? "out.o" : asm_out;
         emitObject(llvmModule.get(), asm_out_final, opts);
         std::cout << "Asm code for " << opts.target_triple << " generated successfully" << std::endl;
         return 0;
