@@ -1,115 +1,348 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <memory>
 #include <cmath>
+#include <dlfcn.h>
+#include <getopt.h>
+
 
 template<typename T, int N>
 struct StridedMemRef
 {
-    T *basePtr;
-    T *data;
+    T* basePtr;
+    T* data;
     int64_t offset;
     int64_t sizes[N];
     int64_t strides[N];
 };
 
 
-extern "C"
+struct MemRefBase
 {
-    void _mlir_ciface_main_graph(
-        StridedMemRef<float, 3> *out,
-        StridedMemRef<float, 4> *X,
-        StridedMemRef<float, 3> *bias1,
-        StridedMemRef<float, 3> *bias2
-    );
-}
+    virtual ~MemRefBase() = default;
 
-void fillTensor4D(float *data, int64_t N, int64_t C, int64_t H, int64_t W, float val)
-{
-    for (int64_t i = 0; i < N * C * H * W; ++i) data[i] = val;
-}
+    virtual void*   getData() = 0;
+    virtual int64_t getTotalElements() const = 0;
+    virtual void    printShape(std::ostream& os) const = 0;
+    virtual void*   getDescPtr() = 0;
+    virtual void    loadFromFile(const std::string& filename) = 0;
+    virtual void    saveToFile(const std::string& filename) const = 0;
+};
 
-bool compareTensors(const float *a, const float *b, int64_t totalElements, float tol = 1e-5f)
+
+template<typename T, int N>
+class MemRefHolder : public MemRefBase
 {
-    for (int64_t i = 0; i < totalElements; ++i)
+public:
+    explicit MemRefHolder(const std::vector<int64_t>& dims)
     {
-        if (std::fabs(a[i] - b[i]) > tol)
+        if (dims.size() != N) throw std::runtime_error("Dimension count mismatch");
+
+        for (int i = 0; i < N; ++i) desc_.sizes[i] = dims[i];
+        int64_t stride = 1;
+
+        for (int i = N - 1; i >= 0; --i)
         {
-            printf("Mismatch at index %lld: expected %f, got %f\n", i, b[i], a[i]);
-            return false;
+            desc_.strides[i] = stride;
+            stride *= dims[i];
         }
+
+        desc_.offset = 0;
+        desc_.basePtr = nullptr;
+        desc_.data = nullptr;
     }
-    return true;
+
+    void* getData() override { return desc_.data; }
+
+    int64_t getTotalElements() const override
+    {
+        int64_t total = 1;
+        for (int i = 0; i < N; ++i) total *= desc_.sizes[i];
+        return total;
+    }
+
+    void printShape(std::ostream& os) const override
+    {
+        os << "[";
+        for (int i = 0; i < N; ++i) {
+            os << desc_.sizes[i];
+            if (i != N - 1) os << ", ";
+        }
+        os << "]";
+    }
+
+    void* getDescPtr() override { return &desc_; }
+
+    void loadFromFile(const std::string& filename) override
+    {
+        int64_t total = getTotalElements();
+        ownedData_.resize(total);
+        std::ifstream ifs(filename, std::ios::binary);
+        if (!ifs) throw std::runtime_error("Cannot open input file: " + filename);
+
+        ifs.read(reinterpret_cast<char*>(ownedData_.data()), total * sizeof(T));
+        if (!ifs) throw std::runtime_error("Failed to read input file: " + filename);
+
+        desc_.basePtr = ownedData_.data();
+        desc_.data = ownedData_.data();
+    }
+
+    void saveToFile(const std::string& filename) const override
+    {
+        std::ofstream ofs(filename, std::ios::binary);
+        if (!ofs) throw std::runtime_error("Cannot open output file: " + filename);
+
+        ofs.write(reinterpret_cast<const char*>(desc_.data), getTotalElements() * sizeof(T));
+        if (!ofs) throw std::runtime_error("Failed to write output file: " + filename);
+    }
+
+private:
+    StridedMemRef<T, N> desc_;
+    std::vector<T> ownedData_;
+};
+
+
+
+std::vector<int64_t> parseShape(const std::string& s)
+{
+    std::vector<int64_t> dims;
+    std::stringstream ss(s);
+    std::string item;
+
+    while (std::getline(ss, item, ','))
+    {
+        dims.push_back(std::stoll(item));
+    }
+
+    return dims;
 }
 
-float* loadBinaryF32(const char* filename, int64_t expectedCount)
+std::vector<std::string> split(const std::string& s, char delim)
 {
-    FILE* f = fopen(filename, "rb");
-    if (!f) { printf("Error opening %s\n", filename); exit(1); }
+    std::vector<std::string> tokens;
+    std::stringstream ss(s);
+    std::string token;
 
-    float* data = (float*)malloc(expectedCount * sizeof(float));
-    size_t read = fread(data, sizeof(float), expectedCount, f);
-    if (read != expectedCount) { printf("Error reading %s\n", filename); exit(1); }
+    while (std::getline(ss, token, delim))
+    {
+        tokens.push_back(token);
+    }
 
-    fclose(f);
+    return tokens;
+}
+
+std::vector<float> readReference(const std::string& filename, int64_t expectedSize)
+{
+    std::vector<float> data(expectedSize);
+    std::ifstream ifs(filename, std::ios::binary);
+    if (!ifs) throw std::runtime_error("Cannot open reference file: " + filename);
+
+    ifs.read(reinterpret_cast<char*>(data.data()), expectedSize * sizeof(float));
+    if (!ifs) throw std::runtime_error("Failed to read reference file: " + filename);
+
     return data;
 }
 
-int main()
+bool compareTensors(const float* a, const float* b, int64_t size, double tol)
 {
-    const int64_t N = 1, C = 3, H = 32, W = 32;
-    const int64_t inputTotal = N * C * H * W;
-    const int64_t D1 = 192, D2 = 16;
-    const int64_t outputTotal = N * D1 * D2;
+    bool err = false;
 
-    // input X
-    float *input_data = (float*)malloc(inputTotal * sizeof(float));
-    fillTensor4D(input_data, N, C, H, W, 1.0f);
-    StridedMemRef<float, 4> X = {
-        input_data, input_data, 0,
-        {N, C, H, W},
-        {C*H*W, H*W, W, 1}
-    };
-
-    // biases from binary
-    float *bias1_data = loadBinaryF32("../bias1.bin", outputTotal);
-    float *bias2_data = loadBinaryF32("../bias2.bin", outputTotal);
-
-    StridedMemRef<float, 3> B1 = {
-        bias1_data, bias1_data, 0,
-        {N, D1, D2},
-        {D1*D2, D2, 1}
-    };
-    StridedMemRef<float, 3> B2 = {
-        bias2_data, bias2_data, 0,
-        {N, D1, D2},
-        {D1*D2, D2, 1}
-    };
-
-    StridedMemRef<float, 3> Y;
-    _mlir_ciface_main_graph(&Y, &X, &B1, &B2);
-    float *model_output = Y.data;
-
-    // computation for checking
-    float *reference_out = (float*)malloc(outputTotal * sizeof(float));
-    memcpy(reference_out, input_data, inputTotal * sizeof(float));
-    for (int64_t i = 0; i < outputTotal; ++i)
+    for (int64_t i = 0; i < size; ++i)
     {
-        float v = reference_out[i] + bias1_data[i];
-        v = (v > 0.0f) ? v : 0.0f;
-        v = v + bias2_data[i];
-        reference_out[i] = v;
+        if (std::fabs(a[i] - b[i]) > tol)
+        {
+            std::cerr << "Mismatch at index " << i << ": expected " << b[i] << ", got " << a[i] << "\n";
+            err = true;
+        }
     }
 
+    return err;
+}
 
-    // checking
-    bool ok = compareTensors(model_output, reference_out, outputTotal);
-    printf("%s\n", ok ? "SUCCESS" : "FAILURE");
 
-    free(input_data);
-    free(bias1_data);
-    free(bias2_data);
-    free(Y.basePtr);
-    free(reference_out);
-    return ok ? 0 : 1;
+void invokeModel(void* funcPtr,
+                std::vector<std::unique_ptr<MemRefBase>>& outputs,
+                std::vector<std::unique_ptr<MemRefBase>>& inputs)
+{
+    const int numOutputs = outputs.size();
+    const int numInputs = inputs.size();
+    const int totalArgs = numOutputs + numInputs;
+    constexpr int MAX_ARGS = 5;
+    if (totalArgs > MAX_ARGS) throw std::runtime_error("Too many arguments");
+
+    void* args[MAX_ARGS];
+    int idx = 0;
+    for (auto& out : outputs) args[idx++] = out->getDescPtr();
+    for (auto& in : inputs)   args[idx++] = in->getDescPtr();
+
+    switch (totalArgs)
+    {
+        case 1:  reinterpret_cast<void (*)(void*)>(funcPtr)(args[0]); break;
+        case 2:  reinterpret_cast<void (*)(void*,void*)>(funcPtr)(args[0], args[1]); break;
+        case 3:  reinterpret_cast<void (*)(void*,void*,void*)>(funcPtr)(args[0], args[1], args[2]); break;
+        case 4:  reinterpret_cast<void (*)(void*,void*,void*,void*)>(funcPtr)(args[0], args[1], args[2], args[3]); break;
+        case 5:  reinterpret_cast<void (*)(void*,void*,void*,void*,void*)>(funcPtr)(args[0], args[1], args[2], args[3], args[4]); break;
+
+        default: throw std::runtime_error("Unsupported argument count");
+    }
+}
+
+
+std::unique_ptr<MemRefBase> createHolder(const std::vector<int64_t>& dims)
+{
+    switch (dims.size())
+    {
+        case 1: return std::make_unique<MemRefHolder<float, 1>>(dims);
+        case 2: return std::make_unique<MemRefHolder<float, 2>>(dims);
+        case 3: return std::make_unique<MemRefHolder<float, 3>>(dims);
+        case 4: return std::make_unique<MemRefHolder<float, 4>>(dims);
+
+        default: throw std::runtime_error("Unsupported rank (max 4)");
+    }
+}
+
+
+int main(int argc, char* argv[])
+{
+    std::string funcName = "_mlir_ciface_main_graph";
+    std::vector<std::string> inputFiles, inputShapeStrs, outputFiles, outputShapeStrs, refFiles;
+    double tolerance = 1e-4;
+    bool verbose = false;
+
+    static struct option long_options[] = {
+        {"func",          required_argument, 0, 'f'},
+        {"input",         required_argument, 0, 'i'},
+        {"input-shape",   required_argument, 0, 's'},
+        {"output",        required_argument, 0, 'o'},
+        {"output-shape",  required_argument, 0, 'p'},
+        {"ref",           required_argument, 0, 'r'},
+        {"verbose",       no_argument,       0, 'v'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    int option_index = 0;
+    while ((opt = getopt_long(argc, argv, "f:i:s:o:p:r:v", long_options, &option_index)) != -1)
+    {
+        switch (opt)
+        {
+            case 'f': funcName          = optarg;               break;
+            case 'i': inputFiles        = split(optarg, ',');   break;
+            case 's': inputShapeStrs    = split(optarg, ';');   break;
+            case 'o': outputFiles       = split(optarg, ',');   break;
+            case 'p': outputShapeStrs   = split(optarg, ';');   break;
+            case 'r': refFiles          = split(optarg, ',');   break;
+            case 'v': verbose           = true;                 break;
+
+            default: return 1;
+        }
+    }
+
+    if (inputFiles.empty() || inputShapeStrs.size() != inputFiles.size())
+    {
+        std::cerr << "Input files and shapes must be provided and match in number\n";
+        return 1;
+    }
+
+    if (!outputShapeStrs.empty() && outputShapeStrs.size() != outputFiles.size() && !outputFiles.empty())
+    {
+        std::cerr << "Output shapes count must match output files count\n";
+        return 1;
+    }
+
+    if (!refFiles.empty() && refFiles.size() != outputShapeStrs.size())
+    {
+        std::cerr << "Number of reference files must match number of outputs\n";
+        return 1;
+    }
+
+    try
+    {
+        void* funcPtr = dlsym(RTLD_DEFAULT, funcName.c_str());
+        const char* err = dlerror();
+        if (err) throw std::runtime_error(std::string("dlsym failed: ") + err);
+
+        std::vector<std::unique_ptr<MemRefBase>> inputs;
+        for (size_t i = 0; i < inputFiles.size(); ++i)
+        {
+            auto dims = parseShape(inputShapeStrs[i]);
+            auto holder = createHolder(dims);
+
+            holder->loadFromFile(inputFiles[i]);
+            inputs.push_back(std::move(holder));
+
+            if (verbose)
+            {
+                std::cout << "Input " << i << ": " << inputFiles[i] << " shape ";
+                inputs.back()->printShape(std::cout);
+                std::cout << "\n";
+            }
+        }
+
+
+        std::vector<std::unique_ptr<MemRefBase>> outputs;
+        for (size_t i = 0; i < outputShapeStrs.size(); ++i)
+        {
+            auto dims = parseShape(outputShapeStrs[i]);
+            auto holder = createHolder(dims);
+            outputs.push_back(std::move(holder));
+
+            if (verbose)
+            {
+                std::cout << "Output " << i << ": shape ";
+                outputs.back()->printShape(std::cout);
+                std::cout << "\n";
+            }
+        }
+
+
+
+        invokeModel(funcPtr, outputs, inputs);
+
+
+
+        bool allOk = true;
+        for (size_t i = 0; i < outputs.size(); ++i)
+        {
+            float* data = static_cast<float*>(outputs[i]->getData());
+            int64_t total = outputs[i]->getTotalElements();
+
+            if (!data)
+                throw std::runtime_error("Output data pointer is null");
+
+            if (i < outputFiles.size() && !outputFiles[i].empty())
+            {
+                outputs[i]->saveToFile(outputFiles[i]);
+            }
+
+            if (i < refFiles.size() && !refFiles[i].empty())
+            {
+                auto ref = readReference(refFiles[i], total);
+                bool ok = compareTensors(data, ref.data(), total, tolerance);
+
+                if (!ok)
+                {
+                    std::cout << "Output " << i << " MISMATCH\n";
+                    allOk = false;
+                }
+                
+                else if (verbose)
+                {
+                    std::cout << "Output " << i << " MATCH\n";
+                }
+            }
+        }
+
+        std::cout << (allOk ? "OK\n" : "FAIL\n");
+        return allOk ? 0 : 1;
+    }
+
+    catch (const std::exception& e)
+    {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
 }
