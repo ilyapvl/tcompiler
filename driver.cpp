@@ -4,7 +4,6 @@
 #include <string>
 #include <sstream>
 #include <memory>
-#include <cassert>
 #include <cmath>
 #include <dlfcn.h>
 #include <getopt.h>
@@ -29,7 +28,6 @@ struct MemRefBase
     virtual int64_t getTotalElements() const = 0;
     virtual void    printShape(std::ostream& os) const = 0;
     virtual void*   getDescPtr() = 0;
-    virtual void    freeData() = 0;
     virtual void    loadFromFile(const std::string& filename) = 0;
     virtual void    saveToFile(const std::string& filename) const = 0;
 };
@@ -45,7 +43,7 @@ public:
 
         for (int i = 0; i < N; ++i) desc_.sizes[i] = dims[i];
         int64_t stride = 1;
-        
+
         for (int i = N - 1; i >= 0; --i)
         {
             desc_.strides[i] = stride;
@@ -77,16 +75,6 @@ public:
     }
 
     void* getDescPtr() override { return &desc_; }
-
-    void freeData() override
-    {
-        if (desc_.basePtr)
-        {
-            std::free(desc_.basePtr);
-            desc_.basePtr = nullptr;
-            desc_.data = nullptr;
-        }
-    }
 
     void loadFromFile(const std::string& filename) override
     {
@@ -160,24 +148,22 @@ std::vector<float> readReference(const std::string& filename, int64_t expectedSi
 
 bool compareTensors(const float* a, const float* b, int64_t size, double tol)
 {
+    bool err = false;
+
     for (int64_t i = 0; i < size; ++i)
     {
         if (std::fabs(a[i] - b[i]) > tol)
         {
             std::cerr << "Mismatch at index " << i << ": expected " << b[i] << ", got " << a[i] << "\n";
-            return false;
+            err = true;
         }
     }
 
-    return true;
+    return err;
 }
 
 
-
-
-using FuncPtr = void (*)();
-
-void invokeModel(FuncPtr func,
+void invokeModel(void* funcPtr,
                 std::vector<std::unique_ptr<MemRefBase>>& outputs,
                 std::vector<std::unique_ptr<MemRefBase>>& inputs)
 {
@@ -194,12 +180,12 @@ void invokeModel(FuncPtr func,
 
     switch (totalArgs)
     {
-        case 1:  reinterpret_cast<void (*)(void*)>(func)(args[0]); break;
-        case 2:  reinterpret_cast<void (*)(void*,void*)>(func)(args[0], args[1]); break;
-        case 3:  reinterpret_cast<void (*)(void*,void*,void*)>(func)(args[0], args[1], args[2]); break;
-        case 4:  reinterpret_cast<void (*)(void*,void*,void*,void*)>(func)(args[0], args[1], args[2], args[3]); break;
-        case 5:  reinterpret_cast<void (*)(void*,void*,void*,void*,void*)>(func)(args[0], args[1], args[2], args[3], args[4]); break;
-        
+        case 1:  reinterpret_cast<void (*)(void*)>(funcPtr)(args[0]); break;
+        case 2:  reinterpret_cast<void (*)(void*,void*)>(funcPtr)(args[0], args[1]); break;
+        case 3:  reinterpret_cast<void (*)(void*,void*,void*)>(funcPtr)(args[0], args[1], args[2]); break;
+        case 4:  reinterpret_cast<void (*)(void*,void*,void*,void*)>(funcPtr)(args[0], args[1], args[2], args[3]); break;
+        case 5:  reinterpret_cast<void (*)(void*,void*,void*,void*,void*)>(funcPtr)(args[0], args[1], args[2], args[3], args[4]); break;
+
         default: throw std::runtime_error("Unsupported argument count");
     }
 }
@@ -275,11 +261,7 @@ int main(int argc, char* argv[])
 
     try
     {
-        void* exec = dlopen(nullptr, RTLD_LAZY);
-        if (!exec) throw std::runtime_error(std::string("dlopen failed: ") + dlerror());
-
-        dlerror();
-        FuncPtr func = reinterpret_cast<FuncPtr>(dlsym(exec, funcName.c_str()));
+        void* funcPtr = dlsym(RTLD_DEFAULT, funcName.c_str());
         const char* err = dlerror();
         if (err) throw std::runtime_error(std::string("dlsym failed: ") + err);
 
@@ -318,7 +300,7 @@ int main(int argc, char* argv[])
 
 
 
-        invokeModel(func, outputs, inputs);
+        invokeModel(funcPtr, outputs, inputs);
 
 
 
@@ -327,6 +309,9 @@ int main(int argc, char* argv[])
         {
             float* data = static_cast<float*>(outputs[i]->getData());
             int64_t total = outputs[i]->getTotalElements();
+
+            if (!data)
+                throw std::runtime_error("Output data pointer is null");
 
             if (i < outputFiles.size() && !outputFiles[i].empty())
             {
@@ -351,16 +336,10 @@ int main(int argc, char* argv[])
             }
         }
 
-        for (auto& out : outputs)
-        {
-            out->freeData();
-        }
-
-        dlclose(exec);
         std::cout << (allOk ? "OK\n" : "FAIL\n");
         return allOk ? 0 : 1;
     }
-    
+
     catch (const std::exception& e)
     {
         std::cerr << "Error: " << e.what() << "\n";
