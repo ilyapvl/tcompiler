@@ -338,10 +338,6 @@ namespace tc
             auto lhs = resolve(node.getInputs()[0]);
             auto rhs = resolve(node.getInputs()[1]);
 
-
-            //always use generic build //TODO - straight generation when same shapes
-
-
             auto result = buildElementwise(nodeType, builder, loc, lhs, rhs, &mlir_ctx_);
             vmap[node.getOutputs()[0]] = result;
         
@@ -361,9 +357,9 @@ namespace tc
             auto A = resolve(node.getInputs()[0]);
             auto B = resolve(node.getInputs()[1]);
 
-            //TODO - if 2D or 3D use linalg.batch_matmul
             auto result = buildMatMul(builder, loc, A, B, false, false, &mlir_ctx_);
             vmap[node.getOutputs()[0]] = result;
+
             return;
         }
 
