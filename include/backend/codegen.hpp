@@ -30,7 +30,7 @@ namespace tc
         bool emit_obj        = false;
 
 
-        std::string target_triple = "arm64_bare_metal";
+        std::string target_triple = "arm64-bare-metal";
         std::string cpu           = "generic";
         std::string features      = "";
 
